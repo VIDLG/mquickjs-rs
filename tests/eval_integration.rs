@@ -1947,9 +1947,9 @@ fn test_math_log10() {
 fn test_math_fround() {
     let mut ctx = Context::new(64 * 1024);
 
-    // fround on integer is identity (for our int-only engine)
+    // fround returns f32 (identity for our f32 engine)
     let result = ctx.eval("return Math.fround(42);").unwrap();
-    assert_eq!(result.to_i32(), Some(42));
+    assert_eq!(result.to_number_f32(), Some(42.0));
 }
 
 // =========================================================================
@@ -2648,8 +2648,8 @@ fn test_number_max_min_value() {
     let result = ctx.eval("return Number.MAX_VALUE > 0;").unwrap();
     assert_eq!(result.to_bool(), Some(true));
 
-    // Number.MIN_VALUE - check it returns a large negative number
-    let result = ctx.eval("return Number.MIN_VALUE < 0;").unwrap();
+    // Number.MIN_VALUE - smallest positive float (per JS spec)
+    let result = ctx.eval("return Number.MIN_VALUE > 0;").unwrap();
     assert_eq!(result.to_bool(), Some(true));
 }
 
@@ -3706,13 +3706,15 @@ fn test_object_define_property() {
 fn test_math_constants() {
     let mut ctx = Context::new(64 * 1024);
 
-    // Math.PI is approximately 3 (integer approx)
+    // Math.PI is f32 PI
     let result = ctx.eval("return Math.PI;").unwrap();
-    assert_eq!(result.to_i32(), Some(3));
+    let pi = result.to_f32().unwrap();
+    assert!((pi - std::f32::consts::PI).abs() < 0.0001);
 
-    // Math.E is approximately 2 (integer approx)
+    // Math.E is f32 E
     let result = ctx.eval("return Math.E;").unwrap();
-    assert_eq!(result.to_i32(), Some(2));
+    let e = result.to_f32().unwrap();
+    assert!((e - std::f32::consts::E).abs() < 0.0001);
 }
 
 #[test]
@@ -3732,13 +3734,15 @@ fn test_math_trig_functions() {
 fn test_math_inverse_trig() {
     let mut ctx = Context::new(64 * 1024);
 
-    // Math.asin(1) = 90 degrees
+    // Math.asin(1) = PI/2 radians
     let result = ctx.eval("return Math.asin(1);").unwrap();
-    assert_eq!(result.to_i32(), Some(90));
+    let val = result.to_number_f32().unwrap();
+    assert!((val - std::f32::consts::FRAC_PI_2).abs() < 0.001);
 
-    // Math.acos(0) = 90 degrees
+    // Math.acos(0) = PI/2 radians
     let result = ctx.eval("return Math.acos(0);").unwrap();
-    assert_eq!(result.to_i32(), Some(90));
+    let val = result.to_number_f32().unwrap();
+    assert!((val - std::f32::consts::FRAC_PI_2).abs() < 0.001);
 
     // Math.atan(0) = 0
     let result = ctx.eval("return Math.atan(0);").unwrap();
@@ -3749,10 +3753,10 @@ fn test_math_inverse_trig() {
 fn test_math_random() {
     let mut ctx = Context::new(64 * 1024);
 
-    // Math.random() returns a value between 0 and 999
+    // Math.random() returns a float in [0, 1)
     let result = ctx.eval("return Math.random();").unwrap();
-    let val = result.to_i32().unwrap();
-    assert!(val >= 0 && val < 1000);
+    let val = result.to_number_f32().unwrap();
+    assert!(val >= 0.0 && val < 1.0);
 }
 
 #[test]
@@ -3763,9 +3767,10 @@ fn test_parse_float() {
     let result = ctx.eval("return parseFloat('42');").unwrap();
     assert_eq!(result.to_i32(), Some(42));
 
-    // parseFloat with decimal (truncated to integer)
+    // parseFloat with decimal returns float
     let result = ctx.eval("return parseFloat('3.14');").unwrap();
-    assert_eq!(result.to_i32(), Some(3));
+    let val = result.to_number_f32().unwrap();
+    assert!((val - 3.14).abs() < 0.01);
 }
 
 #[test]
@@ -4758,5 +4763,484 @@ fn test_clear_timeout_function() {
     ",
         )
         .unwrap();
+    assert!(result.is_string());
+}
+
+// ============================================================
+// Float TypedArray tests
+// ============================================================
+
+#[test]
+fn test_float32_array_nan() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx
+        .eval(
+            "
+        var arr = new Float32Array(1);
+        arr[0] = NaN;
+        return isNaN(arr[0]);
+    ",
+        )
+        .unwrap();
+    assert_eq!(result.to_bool(), Some(true));
+}
+
+#[test]
+fn test_float32_array_infinity() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx
+        .eval(
+            "
+        var arr = new Float32Array(1);
+        arr[0] = Infinity;
+        return arr[0];
+    ",
+        )
+        .unwrap();
+    assert!(result.is_infinite_value());
+    assert!(result.to_number_f32().unwrap() > 0.0);
+}
+
+#[test]
+fn test_float32_array_neg_infinity() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx
+        .eval(
+            "
+        var arr = new Float32Array(1);
+        arr[0] = -Infinity;
+        return arr[0];
+    ",
+        )
+        .unwrap();
+    assert!(result.is_infinite_value());
+    assert!(result.to_number_f32().unwrap() < 0.0);
+}
+
+#[test]
+fn test_float32_array_fractional() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx
+        .eval(
+            "
+        var arr = new Float32Array(2);
+        arr[0] = 1.5;
+        arr[1] = -2.25;
+        return arr[0] + arr[1];
+    ",
+        )
+        .unwrap();
+    let val = result.to_number_f32().unwrap();
+    assert!((val - (-0.75)).abs() < 0.001);
+}
+
+#[test]
+fn test_float64_array_nan() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx
+        .eval(
+            "
+        var arr = new Float64Array(1);
+        arr[0] = NaN;
+        return isNaN(arr[0]);
+    ",
+        )
+        .unwrap();
+    assert_eq!(result.to_bool(), Some(true));
+}
+
+#[test]
+fn test_float64_array_infinity() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx
+        .eval(
+            "
+        var arr = new Float64Array(1);
+        arr[0] = Infinity;
+        return arr[0];
+    ",
+        )
+        .unwrap();
+    assert!(result.is_infinite_value());
+}
+
+#[test]
+fn test_float64_array_neg_infinity() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx
+        .eval(
+            "
+        var arr = new Float64Array(1);
+        arr[0] = -Infinity;
+        return arr[0];
+    ",
+        )
+        .unwrap();
+    assert!(result.is_infinite_value());
+    assert!(result.to_number_f32().unwrap() < 0.0);
+}
+
+#[test]
+fn test_float32_array_whole_number_normalization() {
+    let mut ctx = Context::new(64 * 1024);
+    // Float32Array storing whole numbers should normalize to int
+    let result = ctx
+        .eval(
+            "
+        var arr = new Float32Array(1);
+        arr[0] = 42;
+        return arr[0];
+    ",
+        )
+        .unwrap();
+    assert_eq!(result.to_i32(), Some(42));
+}
+
+#[test]
+fn test_float64_array_whole_number_normalization() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx
+        .eval(
+            "
+        var arr = new Float64Array(1);
+        arr[0] = 100;
+        return arr[0];
+    ",
+        )
+        .unwrap();
+    assert_eq!(result.to_i32(), Some(100));
+}
+
+#[test]
+fn test_float32_array_zero() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx
+        .eval(
+            "
+        var arr = new Float32Array(1);
+        return arr[0];
+    ",
+        )
+        .unwrap();
+    assert_eq!(result.to_i32(), Some(0));
+}
+
+#[test]
+fn test_nan_global() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx.eval("return NaN;").unwrap();
+    assert!(result.is_nan_value());
+}
+
+#[test]
+fn test_infinity_global() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx.eval("return Infinity;").unwrap();
+    assert!(result.is_infinite_value());
+    assert!(result.to_number_f32().unwrap() > 0.0);
+}
+
+#[test]
+fn test_negative_infinity() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx.eval("return -Infinity;").unwrap();
+    assert!(result.is_infinite_value());
+    assert!(result.to_number_f32().unwrap() < 0.0);
+}
+
+#[test]
+fn test_typeof_nan() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx.eval("return typeof NaN;").unwrap();
+    assert!(result.is_string());
+}
+
+#[test]
+fn test_isnan_function() {
+    let mut ctx = Context::new(64 * 1024);
+
+    let result = ctx.eval("return isNaN(NaN);").unwrap();
+    assert_eq!(result.to_bool(), Some(true));
+
+    let result = ctx.eval("return isNaN(42);").unwrap();
+    assert_eq!(result.to_bool(), Some(false));
+
+    let result = ctx.eval("return isNaN(Infinity);").unwrap();
+    assert_eq!(result.to_bool(), Some(false));
+}
+
+#[test]
+fn test_nan_arithmetic() {
+    let mut ctx = Context::new(64 * 1024);
+
+    // NaN + anything = NaN
+    let result = ctx.eval("return NaN + 1;").unwrap();
+    assert!(result.is_nan_value());
+
+    // NaN === NaN should be false
+    let result = ctx.eval("return NaN === NaN;").unwrap();
+    assert_eq!(result.to_bool(), Some(false));
+}
+
+#[test]
+fn test_infinity_arithmetic() {
+    let mut ctx = Context::new(64 * 1024);
+
+    let result = ctx.eval("return Infinity + 1;").unwrap();
+    assert!(result.is_infinite_value());
+
+    let result = ctx.eval("return Infinity - Infinity;").unwrap();
+    assert!(result.is_nan_value());
+
+    let result = ctx.eval("return 1 / Infinity;").unwrap();
+    assert_eq!(result.to_i32(), Some(0));
+}
+
+// ============================================================
+// Implicit type coercion tests
+// ============================================================
+
+// --- ToNumber in arithmetic ---
+
+#[test]
+fn test_bool_plus_number() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return true + 1;").unwrap().to_i32(), Some(2));
+    assert_eq!(ctx.eval("return false + 1;").unwrap().to_i32(), Some(1));
+}
+
+#[test]
+fn test_null_plus_number() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return null + 1;").unwrap().to_i32(), Some(1));
+}
+
+#[test]
+fn test_undefined_plus_number() {
+    let mut ctx = Context::new(64 * 1024);
+    // undefined → NaN, NaN + 1 = NaN
+    assert!(ctx.eval("return undefined + 1;").unwrap().is_nan_value());
+}
+
+#[test]
+fn test_bool_subtract() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return 1 - true;").unwrap().to_i32(), Some(0));
+    assert_eq!(ctx.eval("return 5 - false;").unwrap().to_i32(), Some(5));
+}
+
+#[test]
+fn test_null_subtract() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return 5 - null;").unwrap().to_i32(), Some(5));
+}
+
+#[test]
+fn test_bool_multiply() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return 3 * true;").unwrap().to_i32(), Some(3));
+    assert_eq!(ctx.eval("return 3 * false;").unwrap().to_i32(), Some(0));
+}
+
+#[test]
+fn test_null_multiply() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return 5 * null;").unwrap().to_i32(), Some(0));
+}
+
+#[test]
+fn test_bool_divide() {
+    let mut ctx = Context::new(64 * 1024);
+    let val = ctx
+        .eval("return 6 / true;")
+        .unwrap()
+        .to_number_f32()
+        .unwrap();
+    assert!((val - 6.0).abs() < 0.001);
+}
+
+#[test]
+fn test_bool_modulo() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return 5 % true;").unwrap().to_i32(), Some(0));
+}
+
+#[test]
+fn test_unary_neg_bool() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return -true;").unwrap().to_i32(), Some(-1));
+    assert_eq!(ctx.eval("return -false;").unwrap().to_i32(), Some(0));
+    assert_eq!(ctx.eval("return -null;").unwrap().to_i32(), Some(0));
+}
+
+// --- Abstract Equality == ---
+
+#[test]
+fn test_null_equals_undefined() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(
+        ctx.eval("return null == undefined;").unwrap().to_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval("return undefined == null;").unwrap().to_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_null_not_equals_false() {
+    let mut ctx = Context::new(64 * 1024);
+    // null only == undefined (not false/0/"")
+    assert_eq!(
+        ctx.eval("return null == false;").unwrap().to_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval("return null == 0;").unwrap().to_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn test_bool_coercion_in_eq() {
+    let mut ctx = Context::new(64 * 1024);
+    // true→1, false→0
+    assert_eq!(ctx.eval("return true == 1;").unwrap().to_bool(), Some(true));
+    assert_eq!(
+        ctx.eval("return false == 0;").unwrap().to_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval("return true == 2;").unwrap().to_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn test_strict_eq_no_coercion() {
+    let mut ctx = Context::new(64 * 1024);
+    // === never coerces types
+    assert_eq!(
+        ctx.eval("return true === 1;").unwrap().to_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval("return null === undefined;").unwrap().to_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval("return 0 === false;").unwrap().to_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn test_strict_eq_same_type() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return 1 === 1;").unwrap().to_bool(), Some(true));
+    assert_eq!(ctx.eval("return 1 === 2;").unwrap().to_bool(), Some(false));
+    assert_eq!(
+        ctx.eval("return true === true;").unwrap().to_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval("return null === null;").unwrap().to_bool(),
+        Some(true)
+    );
+}
+
+// --- String comparisons ---
+
+#[test]
+fn test_string_lt_comparison() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return 'a' < 'b';").unwrap().to_bool(), Some(true));
+    assert_eq!(
+        ctx.eval("return 'b' < 'a';").unwrap().to_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval("return 'abc' < 'abd';").unwrap().to_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_string_gt_comparison() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return 'b' > 'a';").unwrap().to_bool(), Some(true));
+    assert_eq!(
+        ctx.eval("return 'a' > 'b';").unwrap().to_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn test_string_lte_gte_comparison() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(
+        ctx.eval("return 'a' <= 'a';").unwrap().to_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval("return 'a' >= 'a';").unwrap().to_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval("return 'a' <= 'b';").unwrap().to_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_string_eq_content() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(
+        ctx.eval("return 'hello' == 'hello';").unwrap().to_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval("return 'hello' == 'world';").unwrap().to_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval("return 'hello' === 'hello';").unwrap().to_bool(),
+        Some(true)
+    );
+}
+
+// --- Bitwise with bool/null ---
+
+#[test]
+fn test_bitwise_bool_coercion() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return true & 1;").unwrap().to_i32(), Some(1));
+    assert_eq!(ctx.eval("return false | 1;").unwrap().to_i32(), Some(1));
+    assert_eq!(ctx.eval("return true ^ true;").unwrap().to_i32(), Some(0));
+}
+
+#[test]
+fn test_bitwise_null_coercion() {
+    let mut ctx = Context::new(64 * 1024);
+    assert_eq!(ctx.eval("return null | 5;").unwrap().to_i32(), Some(5));
+    assert_eq!(ctx.eval("return null & 5;").unwrap().to_i32(), Some(0));
+    assert_eq!(ctx.eval("return ~null;").unwrap().to_i32(), Some(-1));
+}
+
+// --- String concat with non-string values ---
+
+#[test]
+fn test_string_concat_with_undefined() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx.eval("return 'x' + undefined;").unwrap();
+    assert!(result.is_string());
+}
+
+#[test]
+fn test_number_plus_string_coercion() {
+    let mut ctx = Context::new(64 * 1024);
+    // When one side is a string, + does concatenation (number→string)
+    let result = ctx.eval("return 123 + 'abc';").unwrap();
     assert!(result.is_string());
 }

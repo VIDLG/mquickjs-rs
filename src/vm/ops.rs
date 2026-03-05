@@ -3,20 +3,59 @@
 //! All op_* methods are pure computations on Value types.
 
 use super::interpreter::{Interpreter, InterpreterError, InterpreterResult};
-use crate::value::Value;
+use crate::value::{Float, Value, float_to_value};
+
+/// JS ToNumber for a primitive value (bool/null/undefined/number).
+/// Returns None for object/string/array types (caller must handle).
+fn to_numeric(val: Value) -> Option<Float> {
+    if let Some(n) = val.to_number_f32() {
+        return Some(n);
+    }
+    // bool → 0 or 1
+    if let Some(b) = val.to_bool() {
+        return Some(if b { 1.0 } else { 0.0 });
+    }
+    // null → 0
+    if val.is_null() {
+        return Some(0.0);
+    }
+    // undefined → NaN
+    if val.is_undefined() {
+        return Some(Float::NAN);
+    }
+    None
+}
+
+/// JS ToInt32: convert any primitive to i32 (for bitwise ops).
+/// bool → 0/1, null → 0, undefined → 0, NaN/Infinity → 0.
+fn to_int32(val: Value) -> Option<i32> {
+    if let Some(f) = to_numeric(val) {
+        if f.is_nan() || f.is_infinite() {
+            Some(0)
+        } else {
+            Some(f as i32)
+        }
+    } else {
+        None
+    }
+}
+
+/// Extract both operands as Float via ToNumber.
+fn to_numeric_pair(a: Value, b: Value) -> Option<(Float, Float)> {
+    Some((to_numeric(a)?, to_numeric(b)?))
+}
 
 impl Interpreter {
     // Arithmetic operations
 
     pub(crate) fn op_neg(&self, val: Value) -> InterpreterResult<Value> {
         if let Some(n) = val.to_i32() {
-            if n == i32::MIN {
-                // Overflow: would need f64
-                return Err(InterpreterError::InternalError(
-                    "integer overflow".to_string(),
-                ));
+            match n.checked_neg() {
+                Some(r) => Ok(Value::int(r)),
+                None => Ok(Value::float(-(n as Float))),
             }
-            Ok(Value::int(-n))
+        } else if let Some(f) = to_numeric(val) {
+            Ok(float_to_value(-f))
         } else {
             Err(InterpreterError::TypeError(
                 "cannot negate non-number".to_string(),
@@ -25,121 +64,207 @@ impl Interpreter {
     }
 
     pub(crate) fn op_add(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
-            (Some(va), Some(vb)) => Ok(Value::int(va.wrapping_add(vb))),
-            _ => Err(InterpreterError::TypeError(
-                "cannot add non-numbers".to_string(),
-            )),
+        // Fast path: both ints
+        if let (Some(va), Some(vb)) = (a.to_i32(), b.to_i32()) {
+            return match va.checked_add(vb) {
+                Some(r) => Ok(Value::int(r)),
+                None => Ok(Value::float(va as Float + vb as Float)),
+            };
         }
+        // ToNumber for bool/null/undefined/float
+        if let Some((fa, fb)) = to_numeric_pair(a, b) {
+            return Ok(float_to_value(fa + fb));
+        }
+        Err(InterpreterError::TypeError(
+            "cannot add non-numbers".to_string(),
+        ))
     }
 
     pub(crate) fn op_sub(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
-            (Some(va), Some(vb)) => Ok(Value::int(va.wrapping_sub(vb))),
-            _ => Err(InterpreterError::TypeError(
-                "cannot subtract non-numbers".to_string(),
-            )),
+        if let (Some(va), Some(vb)) = (a.to_i32(), b.to_i32()) {
+            return match va.checked_sub(vb) {
+                Some(r) => Ok(Value::int(r)),
+                None => Ok(Value::float(va as Float - vb as Float)),
+            };
         }
+        if let Some((fa, fb)) = to_numeric_pair(a, b) {
+            return Ok(float_to_value(fa - fb));
+        }
+        Err(InterpreterError::TypeError(
+            "cannot subtract non-numbers".to_string(),
+        ))
     }
 
     pub(crate) fn op_mul(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
-            (Some(va), Some(vb)) => Ok(Value::int(va.wrapping_mul(vb))),
-            _ => Err(InterpreterError::TypeError(
-                "cannot multiply non-numbers".to_string(),
-            )),
+        if let (Some(va), Some(vb)) = (a.to_i32(), b.to_i32()) {
+            return match va.checked_mul(vb) {
+                Some(r) => Ok(Value::int(r)),
+                None => Ok(Value::float(va as Float * vb as Float)),
+            };
         }
+        if let Some((fa, fb)) = to_numeric_pair(a, b) {
+            return Ok(float_to_value(fa * fb));
+        }
+        Err(InterpreterError::TypeError(
+            "cannot multiply non-numbers".to_string(),
+        ))
     }
 
     pub(crate) fn op_div(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
-            (Some(va), Some(vb)) => {
-                if vb == 0 {
-                    Err(InterpreterError::DivisionByZero)
-                } else if let Some(result) = va.checked_div(vb) {
-                    Ok(Value::int(result))
+        if let Some((fa, fb)) = to_numeric_pair(a, b) {
+            if fb == 0.0 {
+                if fa == 0.0 || fa.is_nan() {
+                    Ok(Value::nan())
+                } else if fa > 0.0 {
+                    Ok(Value::infinity())
                 } else {
-                    Err(InterpreterError::InternalError(
-                        "integer overflow".to_string(),
-                    ))
+                    Ok(Value::neg_infinity())
                 }
+            } else {
+                Ok(float_to_value(fa / fb))
             }
-            _ => Err(InterpreterError::TypeError(
+        } else {
+            Err(InterpreterError::TypeError(
                 "cannot divide non-numbers".to_string(),
-            )),
+            ))
         }
     }
 
     pub(crate) fn op_mod(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
-            (Some(va), Some(vb)) => {
-                if vb == 0 {
-                    Err(InterpreterError::DivisionByZero)
-                } else if let Some(result) = va.checked_rem(vb) {
-                    Ok(Value::int(result))
-                } else {
-                    Err(InterpreterError::InternalError(
-                        "integer overflow".to_string(),
-                    ))
-                }
+        if let (Some(va), Some(vb)) = (a.to_i32(), b.to_i32()) {
+            if vb == 0 {
+                return Ok(Value::nan());
+            } else if let Some(result) = va.checked_rem(vb) {
+                return Ok(Value::int(result));
+            } else {
+                return Ok(Value::int(0));
             }
-            _ => Err(InterpreterError::TypeError(
+        }
+        if let Some((fa, fb)) = to_numeric_pair(a, b) {
+            if fb == 0.0 {
+                Ok(Value::nan())
+            } else {
+                Ok(float_to_value(fa % fb))
+            }
+        } else {
+            Err(InterpreterError::TypeError(
                 "cannot modulo non-numbers".to_string(),
-            )),
+            ))
         }
     }
 
     // Comparison operations
 
+    /// Numeric less-than comparison (after ToNumber coercion).
     pub(crate) fn op_lt(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
-            (Some(va), Some(vb)) => Ok(Value::bool(va < vb)),
-            _ => Err(InterpreterError::TypeError(
-                "cannot compare non-numbers".to_string(),
-            )),
+        if let (Some(va), Some(vb)) = (a.to_i32(), b.to_i32()) {
+            return Ok(Value::bool(va < vb));
         }
+        if let Some((fa, fb)) = to_numeric_pair(a, b) {
+            // NaN comparisons always false
+            return Ok(Value::bool(!fa.is_nan() && !fb.is_nan() && fa < fb));
+        }
+        Err(InterpreterError::TypeError(
+            "cannot compare non-numbers".to_string(),
+        ))
     }
 
     pub(crate) fn op_lte(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
-            (Some(va), Some(vb)) => Ok(Value::bool(va <= vb)),
-            _ => Err(InterpreterError::TypeError(
-                "cannot compare non-numbers".to_string(),
-            )),
+        if let (Some(va), Some(vb)) = (a.to_i32(), b.to_i32()) {
+            return Ok(Value::bool(va <= vb));
         }
+        if let Some((fa, fb)) = to_numeric_pair(a, b) {
+            return Ok(Value::bool(!fa.is_nan() && !fb.is_nan() && fa <= fb));
+        }
+        Err(InterpreterError::TypeError(
+            "cannot compare non-numbers".to_string(),
+        ))
     }
 
     pub(crate) fn op_gt(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
-            (Some(va), Some(vb)) => Ok(Value::bool(va > vb)),
-            _ => Err(InterpreterError::TypeError(
-                "cannot compare non-numbers".to_string(),
-            )),
+        if let (Some(va), Some(vb)) = (a.to_i32(), b.to_i32()) {
+            return Ok(Value::bool(va > vb));
         }
+        if let Some((fa, fb)) = to_numeric_pair(a, b) {
+            return Ok(Value::bool(!fa.is_nan() && !fb.is_nan() && fa > fb));
+        }
+        Err(InterpreterError::TypeError(
+            "cannot compare non-numbers".to_string(),
+        ))
     }
 
     pub(crate) fn op_gte(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
-            (Some(va), Some(vb)) => Ok(Value::bool(va >= vb)),
-            _ => Err(InterpreterError::TypeError(
-                "cannot compare non-numbers".to_string(),
-            )),
+        if let (Some(va), Some(vb)) = (a.to_i32(), b.to_i32()) {
+            return Ok(Value::bool(va >= vb));
         }
+        if let Some((fa, fb)) = to_numeric_pair(a, b) {
+            return Ok(Value::bool(!fa.is_nan() && !fb.is_nan() && fa >= fb));
+        }
+        Err(InterpreterError::TypeError(
+            "cannot compare non-numbers".to_string(),
+        ))
     }
 
+    /// Abstract Equality Comparison (==), per ECMA-262 §7.2.13.
+    /// Handles cross-type coercions: null==undefined, bool→number, etc.
+    /// String == String is NOT handled here — caller must resolve string content.
     pub(crate) fn op_eq(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        // Simple equality for now (strict equality)
+        // 1. Same type (and same bits) — NaN !== NaN
+        if a == b {
+            if a.is_nan_value() {
+                return Ok(Value::bool(false));
+            }
+            return Ok(Value::bool(true));
+        }
+
+        // 2. null == undefined (and only those two are equal to each other)
+        //    null/undefined are NOT equal to anything else (not 0, not false, not "")
+        if a.is_null() || a.is_undefined() || b.is_null() || b.is_undefined() {
+            let both_nullish =
+                (a.is_null() || a.is_undefined()) && (b.is_null() || b.is_undefined());
+            return Ok(Value::bool(both_nullish));
+        }
+
+        // 3. Cross-type numeric: int(3) == float(3.0), bool==number (bool→0/1 via ToNumber)
+        if let Some((fa, fb)) = to_numeric_pair(a, b) {
+            if fa.is_nan() || fb.is_nan() {
+                return Ok(Value::bool(false));
+            }
+            return Ok(Value::bool(fa == fb));
+        }
+
+        // 4. Everything else (object vs primitive, string vs non-string, etc.)
+        Ok(Value::bool(false))
+    }
+
+    /// Strict Equality Comparison (===), per ECMA-262 §7.2.15.
+    /// No type coercion — only same-type comparison.
+    pub(crate) fn op_strict_eq(&self, a: Value, b: Value) -> InterpreterResult<Value> {
+        // NaN !== NaN
+        if a.is_nan_value() || b.is_nan_value() {
+            return Ok(Value::bool(false));
+        }
+        // Cross-type numeric: int(3) === float(3.0)
+        if let Some((fa, fb)) = a.to_number_f32().zip(b.to_number_f32()) {
+            return Ok(Value::bool(fa == fb));
+        }
         Ok(Value::bool(a == b))
     }
 
     pub(crate) fn op_neq(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        Ok(Value::bool(a != b))
+        let eq = self.op_eq(a, b)?;
+        Ok(Value::bool(!eq.to_bool().unwrap_or(false)))
     }
 
-    // Bitwise operations
+    pub(crate) fn op_strict_neq(&self, a: Value, b: Value) -> InterpreterResult<Value> {
+        let eq = self.op_strict_eq(a, b)?;
+        Ok(Value::bool(!eq.to_bool().unwrap_or(false)))
+    }
+
+    // Bitwise operations — JS ToInt32 coercion (bool/null/undefined included)
 
     pub(crate) fn op_bitwise_not(&self, val: Value) -> InterpreterResult<Value> {
-        if let Some(n) = val.to_i32() {
+        if let Some(n) = to_int32(val) {
             Ok(Value::int(!n))
         } else {
             Err(InterpreterError::TypeError(
@@ -149,7 +274,7 @@ impl Interpreter {
     }
 
     pub(crate) fn op_bitwise_and(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
+        match (to_int32(a), to_int32(b)) {
             (Some(va), Some(vb)) => Ok(Value::int(va & vb)),
             _ => Err(InterpreterError::TypeError(
                 "cannot apply bitwise AND to non-numbers".to_string(),
@@ -158,7 +283,7 @@ impl Interpreter {
     }
 
     pub(crate) fn op_bitwise_or(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
+        match (to_int32(a), to_int32(b)) {
             (Some(va), Some(vb)) => Ok(Value::int(va | vb)),
             _ => Err(InterpreterError::TypeError(
                 "cannot apply bitwise OR to non-numbers".to_string(),
@@ -167,7 +292,7 @@ impl Interpreter {
     }
 
     pub(crate) fn op_bitwise_xor(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
+        match (to_int32(a), to_int32(b)) {
             (Some(va), Some(vb)) => Ok(Value::int(va ^ vb)),
             _ => Err(InterpreterError::TypeError(
                 "cannot apply bitwise XOR to non-numbers".to_string(),
@@ -176,7 +301,7 @@ impl Interpreter {
     }
 
     pub(crate) fn op_shl(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
+        match (to_int32(a), to_int32(b)) {
             (Some(va), Some(vb)) => {
                 let shift = (vb & 0x1f) as u32;
                 Ok(Value::int(va << shift))
@@ -188,7 +313,7 @@ impl Interpreter {
     }
 
     pub(crate) fn op_sar(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
+        match (to_int32(a), to_int32(b)) {
             (Some(va), Some(vb)) => {
                 let shift = (vb & 0x1f) as u32;
                 Ok(Value::int(va >> shift))
@@ -200,7 +325,7 @@ impl Interpreter {
     }
 
     pub(crate) fn op_shr(&self, a: Value, b: Value) -> InterpreterResult<Value> {
-        match (a.to_i32(), b.to_i32()) {
+        match (to_int32(a), to_int32(b)) {
             (Some(va), Some(vb)) => {
                 let shift = (vb & 0x1f) as u32;
                 let result = (va as u32) >> shift;

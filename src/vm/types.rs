@@ -4,7 +4,7 @@
 //! error objects, regex, typed arrays, and interpreter statistics.
 
 use crate::runtime::FunctionBytecode;
-use crate::value::Value;
+use crate::value::{Value, float_to_value};
 use crate::vm::stack::Stack;
 
 // Builtin object indices
@@ -532,22 +532,24 @@ impl TypedArrayObject {
         }
     }
 
-    /// Get element at index as i32
-    pub fn get(&self, index: usize) -> Option<i32> {
+    /// Get element at index as Value
+    pub fn get(&self, index: usize) -> Option<Value> {
         if index >= self.length {
             return None;
         }
         let byte_offset = index * self.kind.byte_size();
         Some(match self.kind {
-            TypedArrayKind::Int8 => self.data[byte_offset] as i8 as i32,
-            TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => self.data[byte_offset] as i32,
+            TypedArrayKind::Int8 => Value::int(self.data[byte_offset] as i8 as i32),
+            TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => {
+                Value::int(self.data[byte_offset] as i32)
+            }
             TypedArrayKind::Int16 => {
                 let bytes = [self.data[byte_offset], self.data[byte_offset + 1]];
-                i16::from_le_bytes(bytes) as i32
+                Value::int(i16::from_le_bytes(bytes) as i32)
             }
             TypedArrayKind::Uint16 => {
                 let bytes = [self.data[byte_offset], self.data[byte_offset + 1]];
-                u16::from_le_bytes(bytes) as i32
+                Value::int(u16::from_le_bytes(bytes) as i32)
             }
             TypedArrayKind::Int32 => {
                 let bytes = [
@@ -556,7 +558,7 @@ impl TypedArrayObject {
                     self.data[byte_offset + 2],
                     self.data[byte_offset + 3],
                 ];
-                i32::from_le_bytes(bytes)
+                Value::int(i32::from_le_bytes(bytes))
             }
             TypedArrayKind::Uint32 => {
                 let bytes = [
@@ -565,7 +567,7 @@ impl TypedArrayObject {
                     self.data[byte_offset + 2],
                     self.data[byte_offset + 3],
                 ];
-                u32::from_le_bytes(bytes) as i32
+                Value::int(u32::from_le_bytes(bytes) as i32)
             }
             TypedArrayKind::Float32 => {
                 let bytes = [
@@ -574,8 +576,7 @@ impl TypedArrayObject {
                     self.data[byte_offset + 2],
                     self.data[byte_offset + 3],
                 ];
-                // Convert float to int for our integer-only VM
-                f32::from_le_bytes(bytes) as i32
+                float_to_value(f32::from_le_bytes(bytes))
             }
             TypedArrayKind::Float64 => {
                 let bytes = [
@@ -588,54 +589,54 @@ impl TypedArrayObject {
                     self.data[byte_offset + 6],
                     self.data[byte_offset + 7],
                 ];
-                // Convert float to int for our integer-only VM
-                f64::from_le_bytes(bytes) as i32
+                float_to_value(f64::from_le_bytes(bytes) as f32)
             }
         })
     }
 
     /// Set element at index
-    pub fn set(&mut self, index: usize, value: i32) -> bool {
+    pub fn set(&mut self, index: usize, value: Value) -> bool {
         if index >= self.length {
             return false;
         }
         let byte_offset = index * self.kind.byte_size();
+        let float_val = value.to_number_f32().unwrap_or(0.0);
+        let int_val = float_val as i32;
         match self.kind {
             TypedArrayKind::Int8 => {
-                self.data[byte_offset] = value as i8 as u8;
+                self.data[byte_offset] = int_val as i8 as u8;
             }
             TypedArrayKind::Uint8 => {
-                self.data[byte_offset] = value as u8;
+                self.data[byte_offset] = int_val as u8;
             }
             TypedArrayKind::Uint8Clamped => {
-                // Clamp value to 0-255 range
-                let clamped = value.clamp(0, 255) as u8;
+                let clamped = int_val.clamp(0, 255) as u8;
                 self.data[byte_offset] = clamped;
             }
             TypedArrayKind::Int16 => {
-                let bytes = (value as i16).to_le_bytes();
+                let bytes = (int_val as i16).to_le_bytes();
                 self.data[byte_offset] = bytes[0];
                 self.data[byte_offset + 1] = bytes[1];
             }
             TypedArrayKind::Uint16 => {
-                let bytes = (value as u16).to_le_bytes();
+                let bytes = (int_val as u16).to_le_bytes();
                 self.data[byte_offset] = bytes[0];
                 self.data[byte_offset + 1] = bytes[1];
             }
             TypedArrayKind::Int32 => {
-                let bytes = value.to_le_bytes();
+                let bytes = int_val.to_le_bytes();
                 self.data[byte_offset..byte_offset + 4].copy_from_slice(&bytes);
             }
             TypedArrayKind::Uint32 => {
-                let bytes = (value as u32).to_le_bytes();
+                let bytes = (int_val as u32).to_le_bytes();
                 self.data[byte_offset..byte_offset + 4].copy_from_slice(&bytes);
             }
             TypedArrayKind::Float32 => {
-                let bytes = (value as f32).to_le_bytes();
+                let bytes = float_val.to_le_bytes();
                 self.data[byte_offset..byte_offset + 4].copy_from_slice(&bytes);
             }
             TypedArrayKind::Float64 => {
-                let bytes = (value as f64).to_le_bytes();
+                let bytes = (float_val as f64).to_le_bytes();
                 self.data[byte_offset..byte_offset + 8].copy_from_slice(&bytes);
             }
         }

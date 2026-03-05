@@ -856,13 +856,10 @@ impl Interpreter {
                                 .to_string()
                         } else if let Some(n) = a.to_i32() {
                             n.to_string()
-                        } else if a.is_bool() {
-                            if a.to_bool().unwrap_or(false) {
-                                "true"
-                            } else {
-                                "false"
-                            }
-                            .to_string()
+                        } else if let Some(f) = a.to_f32() {
+                            crate::value::format_float(f)
+                        } else if let Some(b) = a.to_bool() {
+                            if b { "true" } else { "false" }.to_string()
                         } else if a.is_null() {
                             "null".to_string()
                         } else if a.is_undefined() {
@@ -877,13 +874,10 @@ impl Interpreter {
                                 .to_string()
                         } else if let Some(n) = b.to_i32() {
                             n.to_string()
-                        } else if b.is_bool() {
-                            if b.to_bool().unwrap_or(false) {
-                                "true"
-                            } else {
-                                "false"
-                            }
-                            .to_string()
+                        } else if let Some(f) = b.to_f32() {
+                            crate::value::format_float(f)
+                        } else if let Some(bv) = b.to_bool() {
+                            if bv { "true" } else { "false" }.to_string()
                         } else if b.is_null() {
                             "null".to_string()
                         } else if b.is_undefined() {
@@ -946,9 +940,24 @@ impl Interpreter {
                 op if op == OpCode::Lt as u8 => {
                     let b = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let a = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
-                    match self.try_op(self.op_lt(a, b))? {
-                        Some(result) => self.stack.push(result),
-                        None => continue,
+                    // String lexicographic comparison
+                    if a.is_string() && b.is_string() {
+                        let frame = self.call_stack.last().unwrap();
+                        let bytecode = unsafe { &*frame.bytecode };
+                        let sa = self
+                            .get_string_content(a, bytecode)
+                            .unwrap_or_default()
+                            .to_string();
+                        let sb = self
+                            .get_string_content(b, bytecode)
+                            .unwrap_or_default()
+                            .to_string();
+                        self.stack.push(Value::bool(sa < sb));
+                    } else {
+                        match self.try_op(self.op_lt(a, b))? {
+                            Some(result) => self.stack.push(result),
+                            None => continue,
+                        }
                     }
                 }
 
@@ -956,9 +965,23 @@ impl Interpreter {
                 op if op == OpCode::Lte as u8 => {
                     let b = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let a = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
-                    match self.try_op(self.op_lte(a, b))? {
-                        Some(result) => self.stack.push(result),
-                        None => continue,
+                    if a.is_string() && b.is_string() {
+                        let frame = self.call_stack.last().unwrap();
+                        let bytecode = unsafe { &*frame.bytecode };
+                        let sa = self
+                            .get_string_content(a, bytecode)
+                            .unwrap_or_default()
+                            .to_string();
+                        let sb = self
+                            .get_string_content(b, bytecode)
+                            .unwrap_or_default()
+                            .to_string();
+                        self.stack.push(Value::bool(sa <= sb));
+                    } else {
+                        match self.try_op(self.op_lte(a, b))? {
+                            Some(result) => self.stack.push(result),
+                            None => continue,
+                        }
                     }
                 }
 
@@ -966,9 +989,23 @@ impl Interpreter {
                 op if op == OpCode::Gt as u8 => {
                     let b = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let a = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
-                    match self.try_op(self.op_gt(a, b))? {
-                        Some(result) => self.stack.push(result),
-                        None => continue,
+                    if a.is_string() && b.is_string() {
+                        let frame = self.call_stack.last().unwrap();
+                        let bytecode = unsafe { &*frame.bytecode };
+                        let sa = self
+                            .get_string_content(a, bytecode)
+                            .unwrap_or_default()
+                            .to_string();
+                        let sb = self
+                            .get_string_content(b, bytecode)
+                            .unwrap_or_default()
+                            .to_string();
+                        self.stack.push(Value::bool(sa > sb));
+                    } else {
+                        match self.try_op(self.op_gt(a, b))? {
+                            Some(result) => self.stack.push(result),
+                            None => continue,
+                        }
                     }
                 }
 
@@ -976,46 +1013,94 @@ impl Interpreter {
                 op if op == OpCode::Gte as u8 => {
                     let b = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let a = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
-                    match self.try_op(self.op_gte(a, b))? {
-                        Some(result) => self.stack.push(result),
-                        None => continue,
+                    if a.is_string() && b.is_string() {
+                        let frame = self.call_stack.last().unwrap();
+                        let bytecode = unsafe { &*frame.bytecode };
+                        let sa = self
+                            .get_string_content(a, bytecode)
+                            .unwrap_or_default()
+                            .to_string();
+                        let sb = self
+                            .get_string_content(b, bytecode)
+                            .unwrap_or_default()
+                            .to_string();
+                        self.stack.push(Value::bool(sa >= sb));
+                    } else {
+                        match self.try_op(self.op_gte(a, b))? {
+                            Some(result) => self.stack.push(result),
+                            None => continue,
+                        }
                     }
                 }
 
-                // Comparison: Equal (==)
+                // Comparison: Equal (==) — abstract equality with type coercion
                 op if op == OpCode::Eq as u8 => {
                     let b = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let a = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
-                    match self.try_op(self.op_eq(a, b))? {
-                        Some(result) => self.stack.push(result),
-                        None => continue,
+                    // String == String: compare content
+                    if a.is_string() && b.is_string() {
+                        let frame = self.call_stack.last().unwrap();
+                        let bytecode = unsafe { &*frame.bytecode };
+                        let sa = self.get_string_content(a, bytecode).unwrap_or_default();
+                        let sb = self.get_string_content(b, bytecode).unwrap_or_default();
+                        self.stack.push(Value::bool(sa == sb));
+                    } else {
+                        match self.try_op(self.op_eq(a, b))? {
+                            Some(result) => self.stack.push(result),
+                            None => continue,
+                        }
                     }
                 }
 
-                // Comparison: Not equal (!=)
+                // Comparison: Not equal (!=) — abstract inequality
                 op if op == OpCode::Neq as u8 => {
                     let b = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let a = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
-                    match self.try_op(self.op_neq(a, b))? {
-                        Some(result) => self.stack.push(result),
-                        None => continue,
+                    if a.is_string() && b.is_string() {
+                        let frame = self.call_stack.last().unwrap();
+                        let bytecode = unsafe { &*frame.bytecode };
+                        let sa = self.get_string_content(a, bytecode).unwrap_or_default();
+                        let sb = self.get_string_content(b, bytecode).unwrap_or_default();
+                        self.stack.push(Value::bool(sa != sb));
+                    } else {
+                        match self.try_op(self.op_neq(a, b))? {
+                            Some(result) => self.stack.push(result),
+                            None => continue,
+                        }
                     }
                 }
 
-                // Comparison: Strict equal (===)
+                // Comparison: Strict equal (===) — no type coercion
                 op if op == OpCode::StrictEq as u8 => {
                     let b = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let a = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
-                    let result = Value::bool(a == b);
-                    self.stack.push(result);
+                    // String === String: compare content
+                    if a.is_string() && b.is_string() {
+                        let frame = self.call_stack.last().unwrap();
+                        let bytecode = unsafe { &*frame.bytecode };
+                        let sa = self.get_string_content(a, bytecode).unwrap_or_default();
+                        let sb = self.get_string_content(b, bytecode).unwrap_or_default();
+                        self.stack.push(Value::bool(sa == sb));
+                    } else {
+                        let result = self.op_strict_eq(a, b).unwrap_or(Value::bool(false));
+                        self.stack.push(result);
+                    }
                 }
 
                 // Comparison: Strict not equal (!==)
                 op if op == OpCode::StrictNeq as u8 => {
                     let b = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let a = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
-                    let result = Value::bool(a != b);
-                    self.stack.push(result);
+                    if a.is_string() && b.is_string() {
+                        let frame = self.call_stack.last().unwrap();
+                        let bytecode = unsafe { &*frame.bytecode };
+                        let sa = self.get_string_content(a, bytecode).unwrap_or_default();
+                        let sb = self.get_string_content(b, bytecode).unwrap_or_default();
+                        self.stack.push(Value::bool(sa != sb));
+                    } else {
+                        let result = self.op_strict_neq(a, b).unwrap_or(Value::bool(true));
+                        self.stack.push(result);
+                    }
                 }
 
                 // Logical NOT
@@ -1588,9 +1673,7 @@ impl Interpreter {
                                     if i >= length {
                                         break;
                                     }
-                                    if let Some(n) = v.to_i32() {
-                                        typed_arr.set(i, n);
-                                    }
+                                    typed_arr.set(i, *v);
                                 }
                             }
 
@@ -1812,7 +1895,7 @@ impl Interpreter {
                         STR_OBJECT // typeof null === "object" (JavaScript quirk)
                     } else if val.is_bool() {
                         STR_BOOLEAN
-                    } else if val.is_int() {
+                    } else if val.is_int() || val.is_float() {
                         STR_NUMBER
                     } else if val.is_string() {
                         STR_STRING
@@ -1847,6 +1930,8 @@ impl Interpreter {
                             .to_string()
                     } else if let Some(n) = val.to_i32() {
                         n.to_string()
+                    } else if let Some(f) = val.to_f32() {
+                        crate::value::format_float(f)
                     } else if val.is_bool() {
                         if val.to_bool().unwrap_or(false) {
                             "true"
@@ -1901,8 +1986,8 @@ impl Interpreter {
                     // First check for special global values and builtin objects
                     let val = match name {
                         "undefined" => Some(Value::undefined()),
-                        "NaN" => Some(Value::int(0)), // TODO: proper NaN when floats are added
-                        "Infinity" => Some(Value::int(i32::MAX)), // TODO: proper infinity when floats are added
+                        "NaN" => Some(Value::nan()),
+                        "Infinity" => Some(Value::infinity()),
                         "Math" => Some(Value::builtin_object(BUILTIN_MATH)),
                         "JSON" => Some(Value::builtin_object(BUILTIN_JSON)),
                         "Number" => Some(Value::builtin_object(BUILTIN_NUMBER)),
@@ -2070,7 +2155,6 @@ impl Interpreter {
                             .typed_arrays
                             .get(typed_idx as usize)
                             .and_then(|ta| ta.get(index))
-                            .map(Value::int)
                             .unwrap_or_default();
                         self.stack.push(val);
                         continue;
@@ -2110,7 +2194,6 @@ impl Interpreter {
                             .typed_arrays
                             .get(typed_idx as usize)
                             .and_then(|ta| ta.get(index))
-                            .map(Value::int)
                             .unwrap_or_default();
                         self.stack.push(val);
                         continue;
@@ -2168,9 +2251,8 @@ impl Interpreter {
                             )
                         })? as usize;
 
-                        let int_val = val.to_i32().unwrap_or(0);
                         if let Some(ta) = self.typed_arrays.get_mut(typed_idx as usize) {
-                            ta.set(index, int_val);
+                            ta.set(index, val);
                         }
                         self.stack.push(val);
                         continue;
@@ -2249,7 +2331,7 @@ impl Interpreter {
                         // String property access - check for String.prototype methods
                         let val = self.get_string_property(obj, prop_name);
                         self.stack.push(val);
-                    } else if obj.to_i32().is_some() {
+                    } else if obj.is_number() {
                         // Number property access - check for Number.prototype methods
                         let val = self.get_number_property(obj, prop_name);
                         self.stack.push(val);
@@ -2294,7 +2376,7 @@ impl Interpreter {
                         self.object_get_property(obj_idx, prop_name)
                     } else if obj.is_string() {
                         self.get_string_property(obj, prop_name)
-                    } else if obj.to_i32().is_some() {
+                    } else if obj.is_number() {
                         // Number.prototype methods
                         self.get_number_property(obj, prop_name)
                     } else if obj.is_closure() || obj.to_func_ptr().is_some() {
@@ -2661,6 +2743,8 @@ impl Interpreter {
             val.to_bool().unwrap_or(false)
         } else if val.is_int() {
             val.to_i32().map(|n| n != 0).unwrap_or(false)
+        } else if let Some(f) = val.to_f32() {
+            f != 0.0 && !f.is_nan()
         } else if val.is_null() || val.is_undefined() {
             false
         } else {
@@ -2700,8 +2784,10 @@ impl Interpreter {
                     }
                 }
             }
+        } else if let Some(n) = val.to_i32() {
+            Some(n.to_string())
         } else {
-            val.to_i32().map(|n| n.to_string())
+            val.to_f32().map(crate::value::format_float)
         }
     }
 
@@ -2739,6 +2825,8 @@ impl Interpreter {
             b
         } else if let Some(n) = val.to_i32() {
             n != 0
+        } else if let Some(f) = val.to_f32() {
+            f != 0.0 && !f.is_nan()
         } else if let Some(str_idx) = val.to_string_idx() {
             // Empty string is falsy
             if let Some(s) = self.get_string_by_idx(str_idx) {
@@ -2754,24 +2842,32 @@ impl Interpreter {
 
     /// Convert a value to number
     pub(crate) fn to_number(&self, val: Value) -> Value {
-        if let Some(n) = val.to_i32() {
-            Value::int(n)
+        if val.is_int() || val.is_float() {
+            val
         } else if let Some(b) = val.to_bool() {
             Value::int(if b { 1 } else { 0 })
-        } else if val.is_undefined() || val.is_null() {
-            Value::int(0) // Should be NaN for undefined, 0 for null
+        } else if val.is_null() {
+            Value::int(0)
+        } else if val.is_undefined() {
+            Value::nan()
         } else if let Some(str_idx) = val.to_string_idx() {
-            // Try to parse string as number
             if let Some(s) = self.get_string_by_idx(str_idx) {
-                s.trim()
-                    .parse::<i32>()
-                    .map(Value::int)
-                    .unwrap_or(Value::int(0))
+                let s = s.trim();
+                if s.is_empty() {
+                    return Value::int(0);
+                }
+                if let Ok(i) = s.parse::<i32>() {
+                    Value::int(i)
+                } else if let Ok(f) = s.parse::<crate::value::Float>() {
+                    crate::value::float_to_value(f)
+                } else {
+                    Value::nan()
+                }
             } else {
-                Value::int(0)
+                Value::nan()
             }
         } else {
-            Value::int(0) // Should be NaN for objects
+            Value::nan()
         }
     }
 
@@ -2785,6 +2881,8 @@ impl Interpreter {
             b.to_string()
         } else if let Some(n) = val.to_i32() {
             n.to_string()
+        } else if let Some(f) = val.to_f32() {
+            crate::value::format_float(f)
         } else if val.to_string_idx().is_some() {
             // Already a string - return as-is
             return val;

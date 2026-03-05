@@ -78,13 +78,23 @@ fn test_runtime_error_call_non_function() {
 }
 
 #[test]
-fn test_runtime_error_division_by_zero() {
-    assert_runtime_error("return 1/0;", "division by zero");
+fn test_division_by_zero_returns_infinity() {
+    // Division by zero now returns Infinity (JS standard behavior)
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx.eval("return 1/0;").unwrap();
+    assert!(result.is_infinite_value(), "1/0 should be Infinity");
+
+    let result = ctx.eval("return -1/0;").unwrap();
+    assert!(result.is_infinite_value(), "-1/0 should be -Infinity");
+
+    let result = ctx.eval("return 0/0;").unwrap();
+    assert!(result.is_nan_value(), "0/0 should be NaN");
 }
 
 #[test]
 fn test_runtime_error_type_error_arithmetic() {
-    assert_runtime_error("return null + 1;", "cannot");
+    // Arrays cannot be used in arithmetic — they produce a TypeError
+    assert_runtime_error("var a = [1,2]; return a - 1;", "cannot");
 }
 
 #[test]
