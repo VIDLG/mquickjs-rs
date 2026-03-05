@@ -1,0 +1,138 @@
+//! Tests for error message quality and completeness.
+//!
+//! Verifies that compile errors and runtime errors produce useful,
+//! informative messages including error type, location, and reason.
+
+use mquickjs::Context;
+
+fn eval_err(source: &str) -> String {
+    let mut ctx = Context::new(64 * 1024);
+    ctx.eval(source).unwrap_err().to_string()
+}
+
+fn assert_compile_error(source: &str, needle: &str) {
+    let msg = eval_err(source);
+    assert!(msg.contains("Compile error"), "not a compile error: {msg}");
+    assert!(msg.contains("line"), "missing line info: {msg}");
+    assert!(msg.contains(needle), "expected '{needle}' in: {msg}");
+}
+
+fn assert_runtime_error(source: &str, needle: &str) {
+    let msg = eval_err(source);
+    assert!(msg.contains("Runtime error"), "not a runtime error: {msg}");
+    assert!(msg.contains(needle), "expected '{needle}' in: {msg}");
+}
+
+// =========================================================
+// Compile errors — with line:column info
+// =========================================================
+
+#[test]
+fn test_compile_error_missing_semicolon() {
+    assert_compile_error("var x = 1\nvar y = 2", "Semicolon");
+}
+
+#[test]
+fn test_compile_error_unclosed_string() {
+    // May report as Eof or other token depending on lexer recovery
+    let msg = eval_err("var x = \"hello");
+    assert!(msg.contains("Compile error") || msg.contains("Runtime error"));
+}
+
+#[test]
+fn test_compile_error_unexpected_token() {
+    assert_compile_error("var x = * 3;", "Unexpected token");
+}
+
+#[test]
+fn test_compile_error_unclosed_paren() {
+    assert_compile_error("var x = (1 + 2;", "RParen");
+}
+
+#[test]
+fn test_compile_error_unclosed_brace() {
+    assert_compile_error("function foo() { return 1;", "RBrace");
+}
+
+#[test]
+fn test_compile_error_reserved_word_as_var() {
+    assert_compile_error("var return = 5;", "variable name");
+}
+
+#[test]
+fn test_compile_error_undeclared_variable() {
+    let msg = eval_err("return undeclaredVariable;");
+    assert!(
+        msg.contains("undeclaredVariable"),
+        "should mention the variable name: {msg}"
+    );
+}
+
+// =========================================================
+// Runtime errors
+// =========================================================
+
+#[test]
+fn test_runtime_error_call_non_function() {
+    assert_runtime_error("var x = 42; x();", "not a function");
+}
+
+#[test]
+fn test_runtime_error_division_by_zero() {
+    assert_runtime_error("return 1/0;", "division by zero");
+}
+
+#[test]
+fn test_runtime_error_type_error_arithmetic() {
+    assert_runtime_error("return null + 1;", "cannot");
+}
+
+#[test]
+fn test_runtime_error_stack_overflow() {
+    assert_runtime_error("function r() { return r(); } r();", "stack");
+}
+
+// =========================================================
+// Uncaught exception formatting (previously showed RawValue)
+// =========================================================
+
+#[test]
+fn test_uncaught_error_shows_message() {
+    let msg = eval_err("throw new Error('something broke');");
+    assert!(
+        msg.contains("something broke"),
+        "should include the error message: {msg}"
+    );
+}
+
+#[test]
+fn test_uncaught_type_error_shows_name_and_message() {
+    let msg = eval_err("throw new TypeError('bad type');");
+    assert!(
+        msg.contains("TypeError") && msg.contains("bad type"),
+        "should include error name and message: {msg}"
+    );
+}
+
+// =========================================================
+// try/catch now catches runtime errors (previously escaped)
+// =========================================================
+
+#[test]
+fn test_try_catch_catches_call_non_function() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx.eval(
+        "var caught = ''; try { var x = 42; x(); } catch(e) { caught = e.name + ':' + e.message; } return caught;",
+    ).unwrap();
+    // Result is a string, not an integer
+    assert!(result.to_i32().is_none(), "should return a string, not int");
+}
+
+#[test]
+fn test_try_catch_catches_stack_overflow() {
+    let mut ctx = Context::new(64 * 1024);
+    let result = ctx.eval(
+        "var caught = false; try { function r() { return r(); } r(); } catch(e) { caught = true; } return caught;",
+    );
+    assert!(result.is_ok(), "try/catch should catch stack overflow");
+}

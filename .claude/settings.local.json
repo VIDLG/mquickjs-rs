@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build*)",
+      "Bash(cargo test*)",
+      "Bash(cargo fmt*)",
+      "Bash(cargo clippy*)",
+      "Bash(cargo bench*)",
+      "Bash(cargo run --bin mqjs*)",
+      "Bash(perl -i -pe 's/self\\\\.syntax_error\\\\\\(\\(\"\".*?\"\"\\)\\\\.into\\\\\\(\\\\\\)\\\\\\)/self.syntax_error\\($1\\)/g' src/parser/compiler.rs)",
+      "Bash(grep -v '//')",
+      "Bash(perl -i -pe 's/\"\"\\(Expected catch variable name|Expected .* after finally|Invalid increment operand|Invalid decrement operand|Expected property name after \\\\.|Assignment expressions not yet fully implemented\\)\"\"\\\\.into\\\\\\(\\\\\\)/\"\"$1\"\"/g' src/parser/compiler.rs)",
+      "Bash(xargs wc:*)",
+      "Bash(-e \"throw new Error\\(''uncaught!''\\);\")"
+    ]
+  }
+}

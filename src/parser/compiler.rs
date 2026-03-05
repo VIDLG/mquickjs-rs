@@ -122,7 +122,7 @@ impl<'a> Compiler<'a> {
         self.emit_op(OpCode::ReturnUndef);
 
         if self.had_error {
-            Err(CompileError::SyntaxError("Compilation failed".into()))
+            Err(self.syntax_error("Compilation failed"))
         } else {
             // Convert captures to CaptureInfo
             let captures: Vec<CaptureInfo> = self
@@ -188,10 +188,26 @@ impl<'a> Compiler<'a> {
             self.advance();
             Ok(())
         } else {
-            Err(CompileError::UnexpectedToken {
-                expected: format!("{:?}", expected),
-                found: format!("{:?}", self.current_token),
-            })
+            Err(self.unexpected_token_error(format!("{:?}", expected)))
+        }
+    }
+
+    /// Create an UnexpectedToken error with current position
+    fn unexpected_token_error(&self, expected: String) -> CompileError {
+        CompileError::UnexpectedToken {
+            expected,
+            found: format!("{:?}", self.current_token),
+            line: self.current_pos.line,
+            column: self.current_pos.column,
+        }
+    }
+
+    /// Create a SyntaxError with current position
+    fn syntax_error(&self, message: impl Into<String>) -> CompileError {
+        CompileError::SyntaxError {
+            message: message.into(),
+            line: self.current_pos.line,
+            column: self.current_pos.column,
         }
     }
 
@@ -462,7 +478,7 @@ impl<'a> Compiler<'a> {
                 break;
             }
             if local.name == name {
-                return Err(CompileError::SyntaxError(format!(
+                return Err(self.syntax_error(format!(
                     "Variable '{}' already declared in this scope",
                     name
                 )));
@@ -599,7 +615,7 @@ impl<'a> Compiler<'a> {
 
         let name = match &self.current_token {
             Token::Ident(s) => s.clone(),
-            _ => return Err(CompileError::SyntaxError("Expected variable name".into())),
+            _ => return Err(self.syntax_error("Expected variable name")),
         };
         self.advance();
 
@@ -639,7 +655,7 @@ impl<'a> Compiler<'a> {
 
         let name = match &self.current_token {
             Token::Ident(s) => s.clone(),
-            _ => return Err(CompileError::SyntaxError("Expected variable name".into())),
+            _ => return Err(self.syntax_error("Expected variable name")),
         };
         self.advance();
 
@@ -664,7 +680,7 @@ impl<'a> Compiler<'a> {
         // Get function name
         let name = match &self.current_token {
             Token::Ident(s) => s.clone(),
-            _ => return Err(CompileError::SyntaxError("Expected function name".into())),
+            _ => return Err(self.syntax_error("Expected function name")),
         };
         self.advance();
 
@@ -681,7 +697,7 @@ impl<'a> Compiler<'a> {
                     params.push(param_name.clone());
                     self.advance();
                 } else {
-                    return Err(CompileError::SyntaxError("Expected parameter name".into()));
+                    return Err(self.syntax_error("Expected parameter name"));
                 }
 
                 if !self.match_token(&Token::Comma) {
@@ -914,9 +930,7 @@ impl<'a> Compiler<'a> {
                 self.emit_set_local(index);
                 self.expect(Token::Semicolon)?;
             } else {
-                return Err(CompileError::SyntaxError(
-                    "Expected identifier in for loop".to_string(),
-                ));
+                return Err(self.syntax_error("Expected identifier in for loop".to_string()));
             }
         } else if !self.match_token(&Token::Semicolon) {
             // C-style initializer expression
@@ -1124,9 +1138,7 @@ impl<'a> Compiler<'a> {
         self.advance(); // consume 'break'
 
         if self.loop_stack.is_empty() {
-            return Err(CompileError::SyntaxError(
-                "'break' outside of loop".to_string(),
-            ));
+            return Err(self.syntax_error("'break' outside of loop".to_string()));
         }
 
         // Emit jump (will be patched when loop ends)
@@ -1146,9 +1158,7 @@ impl<'a> Compiler<'a> {
         self.advance(); // consume 'continue'
 
         if self.loop_stack.is_empty() {
-            return Err(CompileError::SyntaxError(
-                "'continue' outside of loop".to_string(),
-            ));
+            return Err(self.syntax_error("'continue' outside of loop".to_string()));
         }
 
         // Get the continue target
@@ -1204,7 +1214,7 @@ impl<'a> Compiler<'a> {
 
         // Expect '{'
         if !self.check(&Token::LBrace) {
-            return Err(CompileError::SyntaxError("Expected '{' after 'try'".into()));
+            return Err(self.syntax_error("Expected '{' after 'try'"));
         }
 
         // Emit Catch opcode with placeholder offset
@@ -1238,9 +1248,7 @@ impl<'a> Compiler<'a> {
                 let name = match &self.current_token {
                     Token::Ident(s) => s.clone(),
                     _ => {
-                        return Err(CompileError::SyntaxError(
-                            "Expected catch variable name".into(),
-                        ));
+                        return Err(self.syntax_error("Expected catch variable name"));
                     }
                 };
                 self.advance();
@@ -1258,7 +1266,7 @@ impl<'a> Compiler<'a> {
 
                 // Parse catch body
                 if !self.check(&Token::LBrace) {
-                    return Err(CompileError::SyntaxError("Expected '{' after catch".into()));
+                    return Err(self.syntax_error("Expected '{' after catch"));
                 }
                 self.block_statement()?;
 
@@ -1269,7 +1277,7 @@ impl<'a> Compiler<'a> {
 
                 // Parse catch body
                 if !self.check(&Token::LBrace) {
-                    return Err(CompileError::SyntaxError("Expected '{' after catch".into()));
+                    return Err(self.syntax_error("Expected '{' after catch"));
                 }
                 self.block_statement()?;
             }
@@ -1290,9 +1298,7 @@ impl<'a> Compiler<'a> {
 
             // Parse finally body
             if !self.check(&Token::LBrace) {
-                return Err(CompileError::SyntaxError(
-                    "Expected '{' after finally".into(),
-                ));
+                return Err(self.syntax_error("Expected '{' after finally"));
             }
             self.block_statement()?;
         }
@@ -1473,10 +1479,7 @@ impl<'a> Compiler<'a> {
                     } else if let Some(idx) = self.resolve_capture(&name) {
                         (false, idx)
                     } else {
-                        return Err(CompileError::SyntaxError(format!(
-                            "Undefined variable '{}'",
-                            name
-                        )));
+                        return Err(self.syntax_error(format!("Undefined variable '{}'", name)));
                     };
 
                     // For compound assignment (+=, -=, etc.), get the current value first
@@ -1585,15 +1588,10 @@ impl<'a> Compiler<'a> {
                         self.emit_op(OpCode::Dup);
                         self.emit_set_capture(idx);
                     } else {
-                        return Err(CompileError::SyntaxError(format!(
-                            "Undefined variable '{}'",
-                            name
-                        )));
+                        return Err(self.syntax_error(format!("Undefined variable '{}'", name)));
                     }
                 } else {
-                    return Err(CompileError::SyntaxError(
-                        "Invalid increment operand".into(),
-                    ));
+                    return Err(self.syntax_error("Invalid increment operand"));
                 }
             }
             Token::MinusMinus => {
@@ -1612,15 +1610,10 @@ impl<'a> Compiler<'a> {
                         self.emit_op(OpCode::Dup);
                         self.emit_set_capture(idx);
                     } else {
-                        return Err(CompileError::SyntaxError(format!(
-                            "Undefined variable '{}'",
-                            name
-                        )));
+                        return Err(self.syntax_error(format!("Undefined variable '{}'", name)));
                     }
                 } else {
-                    return Err(CompileError::SyntaxError(
-                        "Invalid decrement operand".into(),
-                    ));
+                    return Err(self.syntax_error("Invalid decrement operand"));
                 }
             }
 
@@ -1652,10 +1645,9 @@ impl<'a> Compiler<'a> {
             }
 
             _ => {
-                return Err(CompileError::SyntaxError(format!(
-                    "Unexpected token: {:?}",
-                    self.current_token
-                )));
+                return Err(
+                    self.syntax_error(format!("Unexpected token: {:?}", self.current_token))
+                );
             }
         }
 
@@ -1724,7 +1716,7 @@ impl<'a> Compiler<'a> {
                             self.emit_u16(str_idx);
                         }
                     } else {
-                        return Err(CompileError::SyntaxError("Expected property name".into()));
+                        return Err(self.syntax_error("Expected property name"));
                     }
                 }
 
@@ -1761,7 +1753,7 @@ impl<'a> Compiler<'a> {
                 self.expect(Token::RParen)?;
             }
             _ => {
-                return Err(CompileError::SyntaxError(format!(
+                return Err(self.syntax_error(format!(
                     "Expected constructor expression, got {:?}",
                     self.current_token
                 )));
@@ -1781,7 +1773,7 @@ impl<'a> Compiler<'a> {
                         self.emit_op(OpCode::GetField);
                         self.emit_u16(str_idx);
                     } else {
-                        return Err(CompileError::SyntaxError("Expected property name".into()));
+                        return Err(self.syntax_error("Expected property name"));
                     }
                 }
                 Token::LBracket => {
@@ -1822,7 +1814,7 @@ impl<'a> Compiler<'a> {
                 self.expect(Token::RParen)?;
             }
             _ => {
-                return Err(CompileError::SyntaxError(format!(
+                return Err(self.syntax_error(format!(
                     "Expected expression after delete, got {:?}",
                     self.current_token
                 )));
@@ -1844,9 +1836,7 @@ impl<'a> Compiler<'a> {
                     self.emit_u16(const_idx);
                     self.emit_op(OpCode::Delete);
                 } else {
-                    return Err(CompileError::SyntaxError(
-                        "Expected property name after .".into(),
-                    ));
+                    return Err(self.syntax_error("Expected property name after ."));
                 }
             }
             Token::LBracket => {
@@ -1875,7 +1865,7 @@ impl<'a> Compiler<'a> {
                 count += 1;
 
                 if count > 255 {
-                    return Err(CompileError::SyntaxError("Too many arguments".into()));
+                    return Err(self.syntax_error("Too many arguments"));
                 }
 
                 if !self.match_token(&Token::Comma) {
@@ -1899,7 +1889,7 @@ impl<'a> Compiler<'a> {
                 count += 1;
 
                 if count > 65535 {
-                    return Err(CompileError::SyntaxError("Too many array elements".into()));
+                    return Err(self.syntax_error("Too many array elements"));
                 }
 
                 if !self.match_token(&Token::Comma) {
@@ -1985,9 +1975,7 @@ impl<'a> Compiler<'a> {
         // For now, only handle simple variable assignment
         // The left-hand side was already compiled; we need to undo that
         // This is a simplified implementation - a proper one would track lvalues
-        Err(CompileError::SyntaxError(
-            "Assignment expressions not yet fully implemented".into(),
-        ))
+        Err(self.syntax_error("Assignment expressions not yet fully implemented"))
     }
 
     /// Handle ternary conditional: a ? b : c
@@ -2057,10 +2045,7 @@ impl<'a> Compiler<'a> {
             Token::InstanceOf => self.emit_op(OpCode::InstanceOf),
             Token::In => self.emit_op(OpCode::In),
             _ => {
-                return Err(CompileError::SyntaxError(format!(
-                    "Unknown binary operator: {:?}",
-                    op
-                )));
+                return Err(self.syntax_error(format!("Unknown binary operator: {:?}", op)));
             }
         }
         Ok(())
@@ -2153,8 +2138,17 @@ pub struct CompiledFunction {
 /// Compilation error
 #[derive(Debug)]
 pub enum CompileError {
-    UnexpectedToken { expected: String, found: String },
-    SyntaxError(String),
+    UnexpectedToken {
+        expected: String,
+        found: String,
+        line: usize,
+        column: usize,
+    },
+    SyntaxError {
+        message: String,
+        line: usize,
+        column: usize,
+    },
     TooManyConstants,
     TooManyLocals,
 }
@@ -2162,10 +2156,23 @@ pub enum CompileError {
 impl std::fmt::Display for CompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CompileError::UnexpectedToken { expected, found } => {
-                write!(f, "Expected {}, found {}", expected, found)
+            CompileError::UnexpectedToken {
+                expected,
+                found,
+                line,
+                column,
+            } => {
+                write!(
+                    f,
+                    "Expected {}, found {} at line {}:{}",
+                    expected, found, line, column
+                )
             }
-            CompileError::SyntaxError(msg) => write!(f, "Syntax error: {}", msg),
+            CompileError::SyntaxError {
+                message,
+                line,
+                column,
+            } => write!(f, "Syntax error: {} at line {}:{}", message, line, column),
             CompileError::TooManyConstants => write!(f, "Too many constants"),
             CompileError::TooManyLocals => write!(f, "Too many local variables"),
         }

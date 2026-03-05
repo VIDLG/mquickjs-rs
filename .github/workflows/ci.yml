@@ -47,7 +47,7 @@ jobs:
 
       - name: Test examples
         run: |
-          for f in examples/*.js; do
+          for f in js/examples/*.js; do
             echo "Running $f..."
             ./target/release/mqjs "$f"
           done

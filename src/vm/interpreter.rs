@@ -363,6 +363,8 @@ pub enum InterpreterError {
     ReferenceError(String),
     /// Internal error
     InternalError(String),
+    /// Uncaught JS exception (formatted message from Error object or primitive)
+    UncaughtException(String),
 }
 
 impl std::fmt::Display for InterpreterError {
@@ -375,6 +377,7 @@ impl std::fmt::Display for InterpreterError {
             Self::TypeError(msg) => write!(f, "TypeError: {}", msg),
             Self::ReferenceError(msg) => write!(f, "ReferenceError: {}", msg),
             Self::InternalError(msg) => write!(f, "InternalError: {}", msg),
+            Self::UncaughtException(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -1013,9 +1016,10 @@ impl Interpreter {
 
             // Check recursion limit
             if self.call_stack.len() >= self.max_recursion {
-                return Err(InterpreterError::InternalError(
+                self.try_handle_runtime_error(InterpreterError::InternalError(
                     "maximum call stack size exceeded".to_string(),
-                ));
+                ))?;
+                return Ok(Value::undefined());
             }
 
             let frame_ptr = self.stack.len();
@@ -1053,7 +1057,8 @@ impl Interpreter {
             return self.call_function(bytecode, this_val, args);
         }
 
-        Err(InterpreterError::TypeError("not a function".to_string()))
+        self.try_handle_runtime_error(InterpreterError::TypeError("not a function".to_string()))?;
+        Ok(Value::undefined())
     }
 
     /// Execute bytecode and return the result
@@ -1073,9 +1078,10 @@ impl Interpreter {
     ) -> InterpreterResult<Value> {
         // Check recursion limit
         if self.call_stack.len() >= self.max_recursion {
-            return Err(InterpreterError::InternalError(
+            self.try_handle_runtime_error(InterpreterError::InternalError(
                 "maximum call stack size exceeded".to_string(),
-            ));
+            ))?;
+            return Ok(Value::undefined());
         }
 
         let frame_ptr = self.stack.len();
@@ -1103,6 +1109,59 @@ impl Interpreter {
 
         // Run the interpreter loop
         self.run()
+    }
+
+    /// Try to route a runtime error through JS exception handlers.
+    /// Returns Ok(()) if the error was caught (state has been updated to jump to catch block).
+    /// Returns the original Err if no handler is available.
+    fn try_handle_runtime_error(&mut self, err: InterpreterError) -> InterpreterResult<()> {
+        if self.exception_handlers.is_empty() {
+            return Err(err);
+        }
+
+        // Create an error object for the JS exception
+        let (name, message) = match &err {
+            InterpreterError::TypeError(msg) => ("TypeError".to_string(), msg.clone()),
+            InterpreterError::ReferenceError(msg) => ("ReferenceError".to_string(), msg.clone()),
+            InterpreterError::InternalError(msg) => ("InternalError".to_string(), msg.clone()),
+            InterpreterError::DivisionByZero => {
+                ("RangeError".to_string(), "division by zero".to_string())
+            }
+            InterpreterError::StackOverflow => {
+                ("InternalError".to_string(), "stack overflow".to_string())
+            }
+            _ => ("Error".to_string(), err.to_string()),
+        };
+
+        let err_obj = ErrorObject { name, message };
+        let err_idx = self.error_objects.len() as u32;
+        self.error_objects.push(err_obj);
+        let exception = Value::error_object(err_idx);
+
+        // Route through exception handler (same logic as Throw opcode)
+        let handler = self.exception_handlers.pop().unwrap();
+
+        // Unwind call stack to the handler's frame
+        while self.call_stack.len() > handler.frame_depth {
+            self.call_stack.pop();
+        }
+
+        // Restore stack to handler's depth
+        while self.stack.len() > handler.stack_depth {
+            self.stack.pop();
+        }
+
+        // Push the exception value for the catch block
+        self.stack.push(exception);
+
+        // Jump to catch block
+        if let Some(frame) = self.call_stack.last_mut() {
+            frame.pc = handler.catch_pc;
+            Ok(())
+        } else {
+            let msg = format_value(self, exception);
+            Err(InterpreterError::UncaughtException(msg))
+        }
     }
 
     /// Main interpreter loop
@@ -1950,14 +2009,18 @@ impl Interpreter {
                                 })?;
                             (bc, None)
                         } else {
-                            return Err(InterpreterError::TypeError("not a function".to_string()));
+                            self.try_handle_runtime_error(InterpreterError::TypeError(
+                                "not a function".to_string(),
+                            ))?;
+                            continue;
                         };
 
                     // Check recursion limit
                     if self.call_stack.len() >= self.max_recursion {
-                        return Err(InterpreterError::InternalError(
+                        self.try_handle_runtime_error(InterpreterError::InternalError(
                             "maximum call stack size exceeded".to_string(),
-                        ));
+                        ))?;
+                        continue;
                     }
 
                     let callee_frame_ptr = self.stack.len();
@@ -2340,14 +2403,18 @@ impl Interpreter {
                                 })?;
                             (bc, None)
                         } else {
-                            return Err(InterpreterError::TypeError("not a function".to_string()));
+                            self.try_handle_runtime_error(InterpreterError::TypeError(
+                                "not a function".to_string(),
+                            ))?;
+                            continue;
                         };
 
                     // Check recursion limit
                     if self.call_stack.len() >= self.max_recursion {
-                        return Err(InterpreterError::InternalError(
+                        self.try_handle_runtime_error(InterpreterError::InternalError(
                             "maximum call stack size exceeded".to_string(),
-                        ));
+                        ))?;
+                        continue;
                     }
 
                     let callee_frame_ptr = self.stack.len();
@@ -2593,17 +2660,13 @@ impl Interpreter {
                             frame.pc = handler.catch_pc;
                         } else {
                             // No more frames - unhandled exception
-                            return Err(InterpreterError::InternalError(format!(
-                                "Uncaught exception: {:?}",
-                                exception
-                            )));
+                            let msg = format_value(self, exception);
+                            return Err(InterpreterError::UncaughtException(msg));
                         }
                     } else {
                         // No handler - unhandled exception
-                        return Err(InterpreterError::InternalError(format!(
-                            "Uncaught exception: {:?}",
-                            exception
-                        )));
+                        let msg = format_value(self, exception);
+                        return Err(InterpreterError::UncaughtException(msg));
                     }
                 }
 
