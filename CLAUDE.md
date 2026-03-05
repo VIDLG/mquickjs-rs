@@ -60,7 +60,11 @@ The execution pipeline is: **Source JS → Lexer → Parser/Compiler → Bytecod
 
 - **[src/vm/opcode.rs](src/vm/opcode.rs)** — ~80 opcodes.
 
-- **[src/vm/interpreter.rs](src/vm/interpreter.rs)** — Main bytecode dispatch loop. Also owns all heap-allocated JS objects (arrays, strings, closures, error objects, regexp objects, typed arrays) as `Vec`s indexed by `Value` tags. Built-in objects are identified by `BUILTIN_*` constants defined at the top of this file.
+- **[src/vm/interpreter.rs](src/vm/interpreter.rs)** — `Interpreter` struct, bytecode dispatch loop (`run`), and arithmetic/comparison operators. Owns all heap-allocated JS objects as `Vec`s indexed by `Value` tags.
+
+- **[src/vm/property.rs](src/vm/property.rs)** — `get_*_property()` methods that dispatch property access for arrays, strings, numbers, errors, regexps, typed arrays, and built-in objects.
+
+- **[src/vm/natives.rs](src/vm/natives.rs)** — ~100 native function implementations (Array/String/Math/JSON/RegExp/Date methods, `format_value`, JSON parser, etc.).
 
 - **[src/vm/stack.rs](src/vm/stack.rs)** — Value stack with call frames.
 

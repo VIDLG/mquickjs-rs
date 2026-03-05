@@ -82,14 +82,14 @@ print("\n=== [DESIGN] Compile-time variable resolution ===");
 print("undeclaredVar -> compile-time ReferenceError (not runtime)");
 
 // ============================================================
-// PART 3: Implementation bugs (fixable)
+// PART 3: Fixes and remaining issues
 // ============================================================
 
-print("\n=== [BUG] Runtime errors escape try/catch ===");
-// TypeError (call non-function) and InternalError (stack overflow)
-// should go through exception handler but terminate execution instead
-print("KNOWN: call-non-function TypeError escapes try/catch");
-print("KNOWN: stack overflow InternalError escapes try/catch");
+print("\n=== [FIXED] Runtime errors caught by try/catch ===");
+try { var x = 42; x(); } catch (e) { print("OK: call-non-function caught: " + e.name); }
+try { var r = 1/0; } catch (e) { print("OK: division-by-zero caught: " + e.name); }
+try { var bad = null + 1; } catch (e) { print("OK: type-error caught: " + e.name); }
+try { function rec() { return rec(); } rec(); } catch (e) { print("OK: stack-overflow caught: " + e.name); }
 
 print("\n=== [BUG] parseInt lacks hex and partial parse ===");
 print("parseInt('') = " + parseInt("") + " (expected NaN, got 0)");

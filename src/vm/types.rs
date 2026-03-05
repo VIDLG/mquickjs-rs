@@ -1,0 +1,728 @@
+//! Data types used by the interpreter.
+//
+//! Constants, structs, and enums for objects, closures, call frames,
+//! error objects, regex, typed arrays, and interpreter statistics.
+
+use crate::runtime::FunctionBytecode;
+use crate::value::Value;
+use crate::vm::stack::Stack;
+
+// Builtin object indices
+/// Math object index
+pub const BUILTIN_MATH: u32 = 0;
+/// JSON object index (for future use)
+pub const BUILTIN_JSON: u32 = 1;
+/// Number object index
+pub const BUILTIN_NUMBER: u32 = 2;
+/// Boolean object index
+pub const BUILTIN_BOOLEAN: u32 = 3;
+/// console object index
+pub const BUILTIN_CONSOLE: u32 = 4;
+/// Error constructor index
+pub const BUILTIN_ERROR: u32 = 5;
+/// TypeError constructor index
+pub const BUILTIN_TYPE_ERROR: u32 = 6;
+/// ReferenceError constructor index
+pub const BUILTIN_REFERENCE_ERROR: u32 = 7;
+/// SyntaxError constructor index
+pub const BUILTIN_SYNTAX_ERROR: u32 = 8;
+/// RangeError constructor index
+pub const BUILTIN_RANGE_ERROR: u32 = 9;
+/// EvalError constructor index
+pub const BUILTIN_EVAL_ERROR: u32 = 27;
+/// URIError constructor index
+pub const BUILTIN_URI_ERROR: u32 = 28;
+/// InternalError constructor index
+pub const BUILTIN_INTERNAL_ERROR: u32 = 29;
+/// Date object index
+pub const BUILTIN_DATE: u32 = 10;
+/// String object index
+pub const BUILTIN_STRING: u32 = 11;
+/// Object object index
+pub const BUILTIN_OBJECT: u32 = 12;
+/// Array object index
+pub const BUILTIN_ARRAY: u32 = 13;
+/// RegExp object index
+pub const BUILTIN_REGEXP: u32 = 14;
+/// globalThis object index
+pub const BUILTIN_GLOBAL_THIS: u32 = 15;
+/// ArrayBuffer constructor index
+pub const BUILTIN_ARRAY_BUFFER: u32 = 16;
+/// Int8Array constructor index
+pub const BUILTIN_INT8_ARRAY: u32 = 17;
+/// Uint8Array constructor index
+pub const BUILTIN_UINT8_ARRAY: u32 = 18;
+/// Int16Array constructor index
+pub const BUILTIN_INT16_ARRAY: u32 = 19;
+/// Uint16Array constructor index
+pub const BUILTIN_UINT16_ARRAY: u32 = 20;
+/// Int32Array constructor index
+pub const BUILTIN_INT32_ARRAY: u32 = 21;
+/// Uint32Array constructor index
+pub const BUILTIN_UINT32_ARRAY: u32 = 22;
+/// Performance object index
+pub const BUILTIN_PERFORMANCE: u32 = 23;
+/// Uint8ClampedArray constructor index
+pub const BUILTIN_UINT8_CLAMPED_ARRAY: u32 = 24;
+/// Float32Array constructor index
+pub const BUILTIN_FLOAT32_ARRAY: u32 = 25;
+/// Float64Array constructor index
+pub const BUILTIN_FLOAT64_ARRAY: u32 = 26;
+
+/// Native function signature
+///
+/// Native functions take an interpreter reference, this value, and arguments.
+/// Returns a Result with the value or an error message.
+pub type NativeFn =
+    fn(interp: &mut Interpreter, this: Value, args: &[Value]) -> Result<Value, String>;
+
+/// Native function entry in the registry
+#[derive(Clone)]
+pub struct NativeFunction {
+    /// The name of the function
+    pub name: &'static str,
+    /// The native function implementation
+    pub func: NativeFn,
+    /// Number of expected arguments (for arity checking, 0 = variadic)
+    pub arity: u8,
+}
+
+/// Object instance storing properties and constructor reference
+#[derive(Debug, Clone)]
+pub struct ObjectInstance {
+    /// Constructor that created this object (closure index), if any
+    pub constructor: Option<Value>,
+    /// Object properties as key-value pairs
+    pub properties: Vec<(String, Value)>,
+}
+
+impl Default for ObjectInstance {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ObjectInstance {
+    /// Create a new empty object
+    pub fn new() -> Self {
+        ObjectInstance {
+            constructor: None,
+            properties: Vec::new(),
+        }
+    }
+
+    /// Create a new object with a constructor reference
+    pub fn with_constructor(constructor: Value) -> Self {
+        ObjectInstance {
+            constructor: Some(constructor),
+            properties: Vec::new(),
+        }
+    }
+}
+
+/// For-in iterator state
+#[derive(Debug, Clone)]
+pub struct ForInIterator {
+    /// Keys to iterate over
+    pub keys: Vec<String>,
+    /// Current index in keys array
+    pub index: usize,
+}
+
+impl ForInIterator {
+    /// Create a new for-in iterator from an object
+    pub fn from_object(obj: &ObjectInstance) -> Self {
+        let keys = obj.properties.iter().map(|(k, _)| k.clone()).collect();
+        ForInIterator { keys, index: 0 }
+    }
+
+    /// Create a new for-in iterator from an array
+    pub fn from_array(arr: &[Value]) -> Self {
+        let keys = (0..arr.len()).map(|i| i.to_string()).collect();
+        ForInIterator { keys, index: 0 }
+    }
+
+    /// Check if iteration is done
+    pub fn is_done(&self) -> bool {
+        self.index >= self.keys.len()
+    }
+}
+
+impl Iterator for ForInIterator {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.keys.len() {
+            let key = self.keys[self.index].clone();
+            self.index += 1;
+            Some(key)
+        } else {
+            None
+        }
+    }
+}
+
+/// For-of iterator state (iterates over values)
+#[derive(Debug, Clone)]
+pub struct ForOfIterator {
+    /// Values to iterate over
+    pub values: Vec<Value>,
+    /// Current index in values array
+    pub index: usize,
+}
+
+impl ForOfIterator {
+    /// Create a new for-of iterator from an array
+    pub fn from_array(arr: &[Value]) -> Self {
+        ForOfIterator {
+            values: arr.to_vec(),
+            index: 0,
+        }
+    }
+
+    /// Create a new for-of iterator from an object (iterates over property values)
+    pub fn from_object(obj: &ObjectInstance) -> Self {
+        let values = obj.properties.iter().map(|(_, v)| *v).collect();
+        ForOfIterator { values, index: 0 }
+    }
+}
+
+impl Iterator for ForOfIterator {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.values.len() {
+            let val = self.values[self.index];
+            self.index += 1;
+            Some(val)
+        } else {
+            None
+        }
+    }
+}
+
+/// Closure data storing captured variable values
+#[derive(Debug, Clone)]
+pub struct ClosureData {
+    /// Reference to the function bytecode
+    pub bytecode: *const FunctionBytecode,
+    /// Captured variable values
+    pub var_refs: Vec<Value>,
+}
+
+impl ClosureData {
+    /// Create a new closure with captured values
+    pub fn new(bytecode: *const FunctionBytecode, var_refs: Vec<Value>) -> Self {
+        ClosureData { bytecode, var_refs }
+    }
+
+    /// Get a captured variable value
+    pub fn get_var(&self, index: usize) -> Option<Value> {
+        self.var_refs.get(index).copied()
+    }
+
+    /// Set a captured variable value
+    pub fn set_var(&mut self, index: usize, value: Value) {
+        if index < self.var_refs.len() {
+            self.var_refs[index] = value;
+        }
+    }
+}
+
+/// Call frame information
+#[derive(Debug, Clone)]
+pub struct CallFrame {
+    /// Function bytecode being executed
+    pub bytecode: *const FunctionBytecode,
+    /// Program counter (offset into bytecode)
+    pub pc: usize,
+    /// Frame pointer (index into stack where locals start)
+    pub frame_ptr: usize,
+    /// Number of arguments
+    pub arg_count: u16,
+    /// Return address (pc to return to, or usize::MAX for top-level)
+    pub return_pc: usize,
+    /// Previous frame pointer
+    pub prev_frame_ptr: usize,
+    /// `this` value for this call
+    pub this_val: Value,
+    /// The function value itself (for self-reference/recursion)
+    pub this_func: Value,
+    /// Index into closures array if this frame is executing a closure
+    pub closure_idx: Option<usize>,
+    /// Whether this is a constructor call (new operator)
+    pub is_constructor: bool,
+}
+
+impl CallFrame {
+    /// Create a new call frame
+    pub fn new(
+        bytecode: *const FunctionBytecode,
+        frame_ptr: usize,
+        arg_count: u16,
+        this_val: Value,
+        this_func: Value,
+    ) -> Self {
+        CallFrame {
+            bytecode,
+            pc: 0,
+            frame_ptr,
+            arg_count,
+            return_pc: usize::MAX,
+            prev_frame_ptr: 0,
+            this_val,
+            this_func,
+            closure_idx: None,
+            is_constructor: false,
+        }
+    }
+
+    /// Create a call frame for a closure
+    pub fn new_closure(
+        bytecode: *const FunctionBytecode,
+        frame_ptr: usize,
+        arg_count: u16,
+        this_val: Value,
+        this_func: Value,
+        closure_idx: usize,
+    ) -> Self {
+        CallFrame {
+            bytecode,
+            pc: 0,
+            frame_ptr,
+            arg_count,
+            return_pc: usize::MAX,
+            prev_frame_ptr: 0,
+            this_val,
+            this_func,
+            closure_idx: Some(closure_idx),
+            is_constructor: false,
+        }
+    }
+
+    /// Create a call frame for a constructor
+    pub fn new_constructor(
+        bytecode: *const FunctionBytecode,
+        frame_ptr: usize,
+        arg_count: u16,
+        this_val: Value,
+        this_func: Value,
+    ) -> Self {
+        CallFrame {
+            bytecode,
+            pc: 0,
+            frame_ptr,
+            arg_count,
+            return_pc: usize::MAX,
+            prev_frame_ptr: 0,
+            this_val,
+            this_func,
+            closure_idx: None,
+            is_constructor: true,
+        }
+    }
+
+    /// Create a call frame for a closure used as constructor
+    pub fn new_closure_constructor(
+        bytecode: *const FunctionBytecode,
+        frame_ptr: usize,
+        arg_count: u16,
+        this_val: Value,
+        this_func: Value,
+        closure_idx: usize,
+    ) -> Self {
+        CallFrame {
+            bytecode,
+            pc: 0,
+            frame_ptr,
+            arg_count,
+            return_pc: usize::MAX,
+            prev_frame_ptr: 0,
+            this_val,
+            this_func,
+            closure_idx: Some(closure_idx),
+            is_constructor: true,
+        }
+    }
+}
+
+/// Interpreter error
+#[derive(Debug, Clone)]
+pub enum InterpreterError {
+    /// Stack underflow
+    StackUnderflow,
+    /// Stack overflow
+    StackOverflow,
+    /// Invalid opcode
+    InvalidOpcode(u8),
+    /// Division by zero
+    DivisionByZero,
+    /// Type error
+    TypeError(String),
+    /// Reference error
+    ReferenceError(String),
+    /// Internal error
+    InternalError(String),
+    /// Uncaught JS exception (formatted message from Error object or primitive)
+    UncaughtException(String),
+}
+
+impl std::fmt::Display for InterpreterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StackUnderflow => write!(f, "stack underflow"),
+            Self::StackOverflow => write!(f, "stack overflow"),
+            Self::InvalidOpcode(op) => write!(f, "invalid opcode: {}", op),
+            Self::DivisionByZero => write!(f, "division by zero"),
+            Self::TypeError(msg) => write!(f, "TypeError: {}", msg),
+            Self::ReferenceError(msg) => write!(f, "ReferenceError: {}", msg),
+            Self::InternalError(msg) => write!(f, "InternalError: {}", msg),
+            Self::UncaughtException(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for InterpreterError {}
+
+/// Result type for interpreter operations
+pub type InterpreterResult<T> = Result<T, InterpreterError>;
+
+/// Exception handler info
+#[derive(Debug, Clone)]
+pub struct ExceptionHandler {
+    /// Call stack depth when handler was registered
+    pub frame_depth: usize,
+    /// Program counter to jump to when exception is caught
+    pub catch_pc: usize,
+    /// Stack depth when handler was registered (to restore stack)
+    pub stack_depth: usize,
+}
+
+/// Interpreter state
+pub struct Interpreter {
+    /// Value stack
+    pub(crate) stack: Stack,
+    /// Call stack (frames)
+    pub(crate) call_stack: Vec<CallFrame>,
+    /// Maximum call recursion depth
+    pub(crate) max_recursion: usize,
+    /// Runtime strings (created during execution, e.g., from concatenation)
+    /// Indices start from 0x8000 to distinguish from compile-time strings
+    pub(crate) runtime_strings: Vec<String>,
+    /// Closures created during execution
+    /// Values on the stack can reference closures by index
+    pub(crate) closures: Vec<ClosureData>,
+    /// Exception handler stack
+    pub(crate) exception_handlers: Vec<ExceptionHandler>,
+    /// Arrays created during execution
+    /// Values on the stack can reference arrays by index
+    pub(crate) arrays: Vec<Vec<Value>>,
+    /// Objects created during execution
+    /// Values on the stack can reference objects by index
+    pub(crate) objects: Vec<ObjectInstance>,
+    /// For-in iterators created during execution
+    pub(crate) for_in_iterators: Vec<ForInIterator>,
+    /// For-of iterators created during execution
+    pub(crate) for_of_iterators: Vec<ForOfIterator>,
+    /// Native function registry
+    pub(crate) native_functions: Vec<NativeFunction>,
+    /// Error objects created during execution
+    /// Stores (error_type, message) pairs
+    pub(crate) error_objects: Vec<ErrorObject>,
+    /// RegExp objects created during execution
+    pub(crate) regex_objects: Vec<RegExpObject>,
+    /// TypedArray objects created during execution
+    pub(crate) typed_arrays: Vec<TypedArrayObject>,
+    /// ArrayBuffer objects created during execution
+    pub(crate) array_buffers: Vec<ArrayBufferObject>,
+    /// Current compile-time string constants (set during bytecode execution)
+    /// Used by native functions to look up compile-time strings
+    pub(crate) current_string_constants: Option<*const Vec<String>>,
+    /// Target call stack depth for nested call_value invocations
+    /// When set, do_return will return early when reaching this depth
+    pub(crate) nested_call_target_depth: Option<usize>,
+    /// Pending timers (setTimeout callbacks)
+    pub(crate) timers: Vec<Timer>,
+    /// Next timer ID
+    pub(crate) next_timer_id: u32,
+    /// GC stats
+    pub(crate) gc_count: u32,
+}
+
+/// Error object storage
+#[derive(Debug, Clone)]
+pub struct ErrorObject {
+    /// Error type name (e.g., "Error", "TypeError")
+    pub name: String,
+    /// Error message
+    pub message: String,
+}
+
+/// RegExp object storage
+#[derive(Clone)]
+pub struct RegExpObject {
+    /// The compiled regex pattern
+    pub regex: regex::Regex,
+    /// Original pattern string
+    pub pattern: String,
+    /// Flags string (e.g., "gi")
+    pub flags: String,
+    /// Global flag
+    pub global: bool,
+    /// Case-insensitive flag
+    pub ignore_case: bool,
+    /// Multiline flag
+    pub multiline: bool,
+}
+
+impl std::fmt::Debug for RegExpObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegExpObject")
+            .field("pattern", &self.pattern)
+            .field("flags", &self.flags)
+            .finish()
+    }
+}
+
+/// TypedArray element type
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TypedArrayKind {
+    Int8,
+    Uint8,
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float32,
+    Float64,
+}
+
+impl TypedArrayKind {
+    /// Get the byte size of each element
+    pub fn byte_size(&self) -> usize {
+        match self {
+            TypedArrayKind::Int8 | TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => 1,
+            TypedArrayKind::Int16 | TypedArrayKind::Uint16 => 2,
+            TypedArrayKind::Int32 | TypedArrayKind::Uint32 | TypedArrayKind::Float32 => 4,
+            TypedArrayKind::Float64 => 8,
+        }
+    }
+}
+
+/// TypedArray object - stores typed array data
+#[derive(Debug, Clone)]
+pub struct TypedArrayObject {
+    /// The kind of typed array
+    pub kind: TypedArrayKind,
+    /// Raw byte data storage
+    pub data: Vec<u8>,
+    /// Length in elements (not bytes)
+    pub length: usize,
+}
+
+impl TypedArrayObject {
+    /// Create a new typed array with given length
+    pub fn new(kind: TypedArrayKind, length: usize) -> Self {
+        let byte_len = length * kind.byte_size();
+        TypedArrayObject {
+            kind,
+            data: vec![0u8; byte_len],
+            length,
+        }
+    }
+
+    /// Get element at index as i32
+    pub fn get(&self, index: usize) -> Option<i32> {
+        if index >= self.length {
+            return None;
+        }
+        let byte_offset = index * self.kind.byte_size();
+        Some(match self.kind {
+            TypedArrayKind::Int8 => self.data[byte_offset] as i8 as i32,
+            TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => self.data[byte_offset] as i32,
+            TypedArrayKind::Int16 => {
+                let bytes = [self.data[byte_offset], self.data[byte_offset + 1]];
+                i16::from_le_bytes(bytes) as i32
+            }
+            TypedArrayKind::Uint16 => {
+                let bytes = [self.data[byte_offset], self.data[byte_offset + 1]];
+                u16::from_le_bytes(bytes) as i32
+            }
+            TypedArrayKind::Int32 => {
+                let bytes = [
+                    self.data[byte_offset],
+                    self.data[byte_offset + 1],
+                    self.data[byte_offset + 2],
+                    self.data[byte_offset + 3],
+                ];
+                i32::from_le_bytes(bytes)
+            }
+            TypedArrayKind::Uint32 => {
+                let bytes = [
+                    self.data[byte_offset],
+                    self.data[byte_offset + 1],
+                    self.data[byte_offset + 2],
+                    self.data[byte_offset + 3],
+                ];
+                u32::from_le_bytes(bytes) as i32
+            }
+            TypedArrayKind::Float32 => {
+                let bytes = [
+                    self.data[byte_offset],
+                    self.data[byte_offset + 1],
+                    self.data[byte_offset + 2],
+                    self.data[byte_offset + 3],
+                ];
+                // Convert float to int for our integer-only VM
+                f32::from_le_bytes(bytes) as i32
+            }
+            TypedArrayKind::Float64 => {
+                let bytes = [
+                    self.data[byte_offset],
+                    self.data[byte_offset + 1],
+                    self.data[byte_offset + 2],
+                    self.data[byte_offset + 3],
+                    self.data[byte_offset + 4],
+                    self.data[byte_offset + 5],
+                    self.data[byte_offset + 6],
+                    self.data[byte_offset + 7],
+                ];
+                // Convert float to int for our integer-only VM
+                f64::from_le_bytes(bytes) as i32
+            }
+        })
+    }
+
+    /// Set element at index
+    pub fn set(&mut self, index: usize, value: i32) -> bool {
+        if index >= self.length {
+            return false;
+        }
+        let byte_offset = index * self.kind.byte_size();
+        match self.kind {
+            TypedArrayKind::Int8 => {
+                self.data[byte_offset] = value as i8 as u8;
+            }
+            TypedArrayKind::Uint8 => {
+                self.data[byte_offset] = value as u8;
+            }
+            TypedArrayKind::Uint8Clamped => {
+                // Clamp value to 0-255 range
+                let clamped = value.clamp(0, 255) as u8;
+                self.data[byte_offset] = clamped;
+            }
+            TypedArrayKind::Int16 => {
+                let bytes = (value as i16).to_le_bytes();
+                self.data[byte_offset] = bytes[0];
+                self.data[byte_offset + 1] = bytes[1];
+            }
+            TypedArrayKind::Uint16 => {
+                let bytes = (value as u16).to_le_bytes();
+                self.data[byte_offset] = bytes[0];
+                self.data[byte_offset + 1] = bytes[1];
+            }
+            TypedArrayKind::Int32 => {
+                let bytes = value.to_le_bytes();
+                self.data[byte_offset..byte_offset + 4].copy_from_slice(&bytes);
+            }
+            TypedArrayKind::Uint32 => {
+                let bytes = (value as u32).to_le_bytes();
+                self.data[byte_offset..byte_offset + 4].copy_from_slice(&bytes);
+            }
+            TypedArrayKind::Float32 => {
+                let bytes = (value as f32).to_le_bytes();
+                self.data[byte_offset..byte_offset + 4].copy_from_slice(&bytes);
+            }
+            TypedArrayKind::Float64 => {
+                let bytes = (value as f64).to_le_bytes();
+                self.data[byte_offset..byte_offset + 8].copy_from_slice(&bytes);
+            }
+        }
+        true
+    }
+
+    /// Create a subarray view into this typed array
+    pub fn subarray(&self, start: i32, end: Option<i32>) -> TypedArrayObject {
+        let len = self.length as i32;
+
+        // Handle negative indices
+        let start = if start < 0 {
+            (len + start).max(0) as usize
+        } else {
+            (start as usize).min(self.length)
+        };
+
+        let end = match end {
+            Some(e) if e < 0 => (len + e).max(0) as usize,
+            Some(e) => (e as usize).min(self.length),
+            None => self.length,
+        };
+
+        let new_len = end.saturating_sub(start);
+        let byte_size = self.kind.byte_size();
+        let start_offset = start * byte_size;
+        let end_offset = start_offset + new_len * byte_size;
+
+        TypedArrayObject {
+            kind: self.kind,
+            data: self.data[start_offset..end_offset].to_vec(),
+            length: new_len,
+        }
+    }
+}
+
+/// ArrayBuffer object - raw binary data buffer
+#[derive(Debug, Clone)]
+pub struct ArrayBufferObject {
+    /// Raw byte data
+    pub data: Vec<u8>,
+}
+
+impl ArrayBufferObject {
+    /// Create a new ArrayBuffer with the given byte length
+    pub fn new(byte_length: usize) -> Self {
+        ArrayBufferObject {
+            data: vec![0u8; byte_length],
+        }
+    }
+
+    /// Get the byte length
+    pub fn byte_length(&self) -> usize {
+        self.data.len()
+    }
+}
+
+/// Timer for setTimeout/setInterval
+#[derive(Debug, Clone)]
+pub struct Timer {
+    /// Timer ID
+    pub id: u32,
+    /// Callback function
+    pub callback: Value,
+    /// When the timer should fire (milliseconds since start)
+    pub fire_at: u64,
+    /// Whether this timer has been cancelled
+    pub cancelled: bool,
+}
+
+/// Statistics about interpreter memory usage
+#[derive(Debug, Clone, Default)]
+pub struct InterpreterStats {
+    /// Number of runtime strings
+    pub runtime_strings: usize,
+    /// Number of arrays
+    pub arrays: usize,
+    /// Number of objects
+    pub objects: usize,
+    /// Number of closures
+    pub closures: usize,
+    /// Number of error objects
+    pub error_objects: usize,
+    /// Number of regex objects
+    pub regex_objects: usize,
+    /// Number of typed arrays
+    pub typed_arrays: usize,
+    /// Number of array buffers
+    pub array_buffers: usize,
+}

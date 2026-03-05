@@ -302,17 +302,16 @@
 
 ## 已知限制与偏差
 
-### try/catch 无法捕获的错误
+### try/catch 错误处理
 
-以下运行时错误会绕过 try/catch 直接终止执行：
+所有运行时错误（TypeError、RangeError、InternalError 等）均可被 try/catch 捕获，包括：
 
-- **调用非函数值**（如 `var x = 42; x()`）—— TypeError 逃逸
-- **栈溢出**（无限递归）—— InternalError 逃逸
-- **属性访问类型错误**（如某些 null/undefined 属性访问）
+- 调用非函数值（`var x = 42; x()`）→ TypeError
+- 栈溢出（无限递归）→ InternalError
+- 除零错误（`1/0`）→ RangeError
+- 类型错误（`null + 1`）→ TypeError
 
-只有通过 `throw` 显式抛出的值才能被 try/catch 正确捕获。
-
-**根因**：引擎内部有两条独立的错误路径。显式 `throw` 走 JS 异常处理机制（`Throw` opcode → `exception_handlers` 栈），而运行时验证错误（如调用非函数）直接返回 Rust 的 `Result::Err`，跳过了 JS 异常处理器。
+显式 `throw` 和引擎内部运行时错误走统一的异常处理路径（`exception_handlers` 栈）。
 
 ### parseInt / parseFloat 偏差
 
