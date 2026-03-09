@@ -2,18 +2,23 @@
 
 [English](README.md) | 中文
 
-Fabrice Bellard 的 [MQuickJS](https://github.com/bellard/mquickjs) 的 Rust 移植版——一个专为嵌入式系统设计的极简 JavaScript 引擎。
+Fabrice Bellard 的 [MQuickJS](https://github.com/bellard/mquickjs) 的 Rust 移植版，当前目标是演进为面向 ESP32 等 MCU 设备的 LED 特效脚本运行时。
 
-> **注意**：这是一个**学习项目**，仅供教育用途。它展示了 JavaScript 引擎的内部工作原理（词法分析器、解析器、字节码编译器、虚拟机、垃圾回收器），不适用于生产环境。
+本仓库的产品目标不是完整实现 ECMAScript，而是提供一个**受限的 ES6 风格脚本子集**，重点保证可预测执行、资源可控和宿主集成稳定性。
+
+相关文档：
+
+- `docs/LED_PROFILE.md`：产品脚本规范
+- `docs/PRODUCT_ROADMAP.md`：产品化路线图
+- `docs/JS_FEATURE_SPEC.md`：当前引擎实现说明
 
 ## 特性
 
-- **极小内存占用**：最低 10KB RAM 即可运行 JavaScript
-- **ES5 子集**："严格模式"JavaScript，包含核心语言特性
-- **追踪式 GC**：标记-压缩垃圾回收器（非引用计数）
-- **基于栈的虚拟机**：高效的字节码解释器
-- **UTF-8 字符串**：节省内存的字符串存储
-- **无 unsafe 代码**：纯安全 Rust 实现
+- **面向嵌入式**：聚焦 MCU 上的 LED 特效脚本执行
+- **受限 ES6 风格子集**：以文档定义的 Profile 为准，而不是完整 ES6
+- **基于栈的虚拟机**：保持较小核心与较清晰的执行路径
+- **TypedArray 数据通路**：以 `Uint8Array` 作为 LED 帧缓冲的核心载体
+- **适合离线编译流程**：便于源码校验、编译与设备端加载
 
 ## 安装
 
@@ -93,7 +98,13 @@ fn main() {
 }
 ```
 
-## 支持的语言特性
+## 脚本 Profile
+
+产品脚本应以 `docs/LED_PROFILE.md` 为准。
+
+本项目有意采用受限脚本规范，而不是追求完整标准兼容。凡未在 Profile 中明确列出的特性，均不应视为产品可依赖能力。
+
+## 引擎能力
 
 ### 语言核心
 

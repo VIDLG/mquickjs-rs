@@ -83,6 +83,8 @@ pub struct Compiler<'a> {
     outer_locals: Option<Vec<Local>>,
     /// Outer function's captures (for resolving nested captures)
     outer_captures: Option<Vec<Capture>>,
+    /// Last variable reference (for postfix ++ / --): (is_local, index)
+    last_var_ref: Option<(bool, usize)>,
 }
 
 impl<'a> Compiler<'a> {
@@ -109,6 +111,7 @@ impl<'a> Compiler<'a> {
             captures: Vec::new(),
             outer_locals: None,
             outer_captures: None,
+            last_var_ref: None,
         }
     }
 
@@ -609,29 +612,34 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Parse var declaration: var x = expr;
+    /// Parse var declaration: var x = expr; or var x = 1, y = 2, z = 3;
     fn var_declaration(&mut self) -> Result<(), CompileError> {
         self.advance(); // consume 'var'
 
-        let name = match &self.current_token {
-            Token::Ident(s) => s.clone(),
-            _ => return Err(self.syntax_error("Expected variable name")),
-        };
-        self.advance();
+        loop {
+            let name = match &self.current_token {
+                Token::Ident(s) => s.clone(),
+                _ => return Err(self.syntax_error("Expected variable name")),
+            };
+            self.advance();
 
-        // Declare the variable
-        let index = self.declare_local(&name)?;
+            // Declare the variable
+            let index = self.declare_local(&name)?;
 
-        // Optional initializer
-        if self.match_token(&Token::Eq) {
-            self.expression()?;
-        } else {
-            self.emit_op(OpCode::Undefined);
+            // Optional initializer
+            if self.match_token(&Token::Eq) {
+                self.expression()?;
+            } else {
+                self.emit_op(OpCode::Undefined);
+            }
+
+            self.emit_set_local(index);
+
+            // Check for comma (more declarators)
+            if !self.match_token(&Token::Comma) {
+                break;
+            }
         }
-
-        // Store to local (value stays on stack as the local)
-        // Actually we need to emit set_local here
-        self.emit_set_local(index);
 
         // Expect semicolon
         self.expect(Token::Semicolon)?;
@@ -649,25 +657,33 @@ impl<'a> Compiler<'a> {
         self.var_declaration_impl("const")
     }
 
-    /// Common implementation for var/let/const
+    /// Common implementation for var/let/const (supports comma-separated declarators)
     fn var_declaration_impl(&mut self, _keyword: &str) -> Result<(), CompileError> {
         self.advance(); // consume keyword
 
-        let name = match &self.current_token {
-            Token::Ident(s) => s.clone(),
-            _ => return Err(self.syntax_error("Expected variable name")),
-        };
-        self.advance();
+        loop {
+            let name = match &self.current_token {
+                Token::Ident(s) => s.clone(),
+                _ => return Err(self.syntax_error("Expected variable name")),
+            };
+            self.advance();
 
-        let index = self.declare_local(&name)?;
+            let index = self.declare_local(&name)?;
 
-        if self.match_token(&Token::Eq) {
-            self.expression()?;
-        } else {
-            self.emit_op(OpCode::Undefined);
+            if self.match_token(&Token::Eq) {
+                self.expression()?;
+            } else {
+                self.emit_op(OpCode::Undefined);
+            }
+
+            self.emit_set_local(index);
+
+            // Check for comma (more declarators)
+            if !self.match_token(&Token::Comma) {
+                break;
+            }
         }
 
-        self.emit_set_local(index);
         self.expect(Token::Semicolon)?;
 
         Ok(())
@@ -1403,6 +1419,8 @@ impl<'a> Compiler<'a> {
 
     /// Parse prefix expression (unary, literals, grouping)
     fn prefix_expr(&mut self) -> Result<(), CompileError> {
+        // Clear last variable reference (set when we parse an identifier)
+        self.last_var_ref = None;
         match &self.current_token {
             // Literals
             Token::Number(n) => {
@@ -1472,6 +1490,51 @@ impl<'a> Compiler<'a> {
                 self.emit_op(OpCode::PushThis);
             }
 
+            // Function expression: function(args) { body } or function name(args) { body }
+            Token::Function => {
+                self.advance(); // consume 'function'
+
+                // Optional function name (for named function expressions / recursion)
+                let func_name = if let Token::Ident(s) = &self.current_token {
+                    let name = s.clone();
+                    self.advance();
+                    Some(name)
+                } else {
+                    None
+                };
+
+                // Parse parameter list
+                self.expect(Token::LParen)?;
+                let mut params: Vec<String> = Vec::new();
+
+                if !self.check(&Token::RParen) {
+                    loop {
+                        if let Token::Ident(param_name) = &self.current_token {
+                            params.push(param_name.clone());
+                            self.advance();
+                        } else {
+                            return Err(self.syntax_error("Expected parameter name"));
+                        }
+                        if !self.match_token(&Token::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Token::RParen)?;
+
+                // Parse function body
+                self.expect(Token::LBrace)?;
+                let body_bytecode =
+                    self.compile_function_body(func_name.as_deref(), &params)?;
+
+                let bytecode_idx = self.functions.len();
+                self.functions.push(body_bytecode);
+
+                // Emit instruction to create function closure (value stays on stack)
+                self.emit_op(OpCode::FClosure);
+                self.emit_u16(bytecode_idx as u16);
+            }
+
             // Identifiers (variables)
             Token::Ident(name) => {
                 let name = name.clone();
@@ -1529,11 +1592,14 @@ impl<'a> Compiler<'a> {
                     }
                 } else if let Some(idx) = self.resolve_local(&name) {
                     self.emit_get_local(idx);
+                    self.last_var_ref = Some((true, idx));
                 } else if let Some(idx) = self.resolve_capture(&name) {
                     self.emit_get_capture(idx);
+                    self.last_var_ref = Some((false, idx));
                 } else {
                     // Try as a global (builtin function)
                     self.emit_get_global(&name);
+                    self.last_var_ref = None;
                 }
             }
 
@@ -1653,6 +1719,59 @@ impl<'a> Compiler<'a> {
                 self.emit_u16(arg_count);
             }
 
+            // Object literal: { key: value, key2: value2 }
+            // Also supports shorthand: { speed } => { speed: speed }
+            Token::LBrace => {
+                self.advance(); // consume '{'
+
+                // Emit Object opcode to create empty object
+                self.emit_op(OpCode::Object);
+                self.emit_u16(0); // class id (unused)
+
+                // Parse properties
+                while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
+                    // Get property key (identifier or string)
+                    let key = match &self.current_token {
+                        Token::Ident(s) => s.clone(),
+                        Token::String(s) => s.clone(),
+                        _ => return Err(self.syntax_error("Expected property name")),
+                    };
+                    self.advance();
+
+                    let str_idx = self.string_constants.len() as u16;
+                    self.string_constants.push(key.clone());
+
+                    // Dup the object so PutField can consume it
+                    self.emit_op(OpCode::Dup);
+
+                    if self.match_token(&Token::Colon) {
+                        // Normal property: key: value
+                        self.expression()?;
+                    } else {
+                        // Shorthand property: { speed } => { speed: speed }
+                        // Resolve the identifier as a variable
+                        if let Some(idx) = self.resolve_local(&key) {
+                            self.emit_get_local(idx);
+                        } else if let Some(idx) = self.resolve_capture(&key) {
+                            self.emit_get_capture(idx);
+                        } else {
+                            self.emit_get_global(&key);
+                        }
+                    }
+
+                    // PutField pops obj+val, pushes val
+                    self.emit_op(OpCode::PutField);
+                    self.emit_u16(str_idx);
+                    // Drop the val, keeping the original object on stack
+                    self.emit_op(OpCode::Drop);
+
+                    // Optional comma between properties
+                    self.match_token(&Token::Comma);
+                }
+
+                self.expect(Token::RBrace)?;
+            }
+
             _ => {
                 return Err(
                     self.syntax_error(format!("Unexpected token: {:?}", self.current_token))
@@ -1729,8 +1848,41 @@ impl<'a> Compiler<'a> {
                     }
                 }
 
-                // Post-increment/decrement handled here for simple variables
-                // (more complex cases would need special handling)
+                // Post-increment: i++
+                Token::PlusPlus => {
+                    if let Some((is_local, idx)) = self.last_var_ref.take() {
+                        self.advance();
+                        // Old value is on stack (expression result)
+                        // Duplicate it, increment, store back
+                        self.emit_op(OpCode::Dup);
+                        self.emit_op(OpCode::Inc);
+                        if is_local {
+                            self.emit_set_local(idx);
+                        } else {
+                            self.emit_set_capture(idx);
+                        }
+                        // Old value remains on stack as expression result
+                    } else {
+                        break;
+                    }
+                }
+
+                // Post-decrement: i--
+                Token::MinusMinus => {
+                    if let Some((is_local, idx)) = self.last_var_ref.take() {
+                        self.advance();
+                        self.emit_op(OpCode::Dup);
+                        self.emit_op(OpCode::Dec);
+                        if is_local {
+                            self.emit_set_local(idx);
+                        } else {
+                            self.emit_set_capture(idx);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
                 _ => break,
             }
         }
@@ -2010,18 +2162,26 @@ impl<'a> Compiler<'a> {
     fn short_circuit_expr(&mut self, op: &Token) -> Result<(), CompileError> {
         match op {
             Token::AmpAmp => {
-                // Left is on stack; if false, skip right
+                // Left is on stack; dup it so the conditional jump doesn't consume
+                // the value we may want to keep as the result.
+                self.emit_op(OpCode::Dup);
                 let end_jump = self.emit_jump(OpCode::IfFalse);
-                self.emit_op(OpCode::Drop); // Drop the true value
+                // Left was truthy — drop the duplicated left, evaluate right
+                self.emit_op(OpCode::Drop);
                 self.parse_precedence(Precedence::LogicalAnd.next())?;
                 self.patch_jump(end_jump);
+                // If left was falsy: IfFalse popped the dup, original left remains on stack.
             }
             Token::PipePipe => {
-                // Left is on stack; if true, skip right
+                // Left is on stack; dup it so the conditional jump doesn't consume
+                // the value we may want to keep as the result.
+                self.emit_op(OpCode::Dup);
                 let end_jump = self.emit_jump(OpCode::IfTrue);
-                self.emit_op(OpCode::Drop); // Drop the false value
+                // Left was falsy — drop the duplicated left, evaluate right
+                self.emit_op(OpCode::Drop);
                 self.parse_precedence(Precedence::LogicalOr.next())?;
                 self.patch_jump(end_jump);
+                // If left was truthy: IfTrue popped the dup, original left remains on stack.
             }
             _ => unreachable!(),
         }

@@ -286,6 +286,9 @@ impl Interpreter {
                 "length" => Value::int(ta.length as i32),
                 "byteLength" => Value::int(ta.data.len() as i32),
                 "BYTES_PER_ELEMENT" => Value::int(ta.kind.byte_size() as i32),
+                "fill" => self
+                    .get_native_func("TypedArray.prototype.fill")
+                    .unwrap_or_default(),
                 "subarray" => self
                     .get_native_func("TypedArray.prototype.subarray")
                     .unwrap_or_default(),

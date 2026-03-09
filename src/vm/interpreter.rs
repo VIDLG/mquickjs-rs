@@ -28,6 +28,7 @@ impl Interpreter {
             max_recursion: Self::DEFAULT_MAX_RECURSION,
             runtime_strings: Vec::new(),
             closures: Vec::new(),
+            var_cells: Vec::new(),
             exception_handlers: Vec::new(),
             arrays: Vec::new(),
             objects: Vec::new(),
@@ -58,6 +59,7 @@ impl Interpreter {
             max_recursion,
             runtime_strings: Vec::new(),
             closures: Vec::new(),
+            var_cells: Vec::new(),
             exception_handlers: Vec::new(),
             arrays: Vec::new(),
             objects: Vec::new(),
@@ -136,6 +138,26 @@ impl Interpreter {
         Value::string(Self::RUNTIME_STRING_OFFSET + idx as u16)
     }
 
+    /// Promote a compile-time string value to a runtime string so it can be
+    /// safely stored in objects/arrays that outlive the current bytecode scope.
+    fn promote_string(&mut self, val: Value, bytecode: &FunctionBytecode) -> Value {
+        if !val.is_string() {
+            return val;
+        }
+        if let Some(idx) = val.to_string_idx() {
+            // Built-in strings and runtime strings are already global
+            if crate::value::get_builtin_string(idx).is_some() || idx >= Self::RUNTIME_STRING_OFFSET
+            {
+                return val;
+            }
+            // Compile-time string — promote to runtime
+            if let Some(s) = bytecode.string_constants.get(idx as usize) {
+                return self.create_runtime_string(s.clone());
+            }
+        }
+        val
+    }
+
     /// Get a string by its index (works for both compile-time and runtime strings)
     /// For compile-time strings, uses current_string_constants if set.
     pub fn get_string_by_idx(&self, str_idx: u16) -> Option<&str> {
@@ -155,11 +177,33 @@ impl Interpreter {
     }
 
     /// Create a closure and return a Value that references it
-    fn create_closure(&mut self, bytecode: *const FunctionBytecode, var_refs: Vec<Value>) -> Value {
+    fn create_closure(
+        &mut self,
+        bytecode: *const FunctionBytecode,
+        cell_indices: Vec<u32>,
+    ) -> Value {
         let idx = self.closures.len();
-        self.closures.push(ClosureData::new(bytecode, var_refs));
+        self.closures.push(ClosureData::new(bytecode, cell_indices));
         // Use high bit to mark as closure index
         Value::closure_idx(idx as u32)
+    }
+
+    /// Allocate a new variable cell with the given initial value, return its index.
+    fn alloc_var_cell(&mut self, value: Value) -> u32 {
+        let idx = self.var_cells.len() as u32;
+        self.var_cells.push(value);
+        idx
+    }
+
+    /// Read raw bytes of a TypedArray value.
+    ///
+    /// Useful in native functions to efficiently extract buffer data.
+    /// Returns `None` if the value is not a TypedArray or the index is invalid.
+    pub fn read_typed_array(&self, value: Value) -> Option<&[u8]> {
+        let idx = value.to_typed_array_idx()?;
+        self.typed_arrays
+            .get(idx as usize)
+            .map(|ta| ta.data.as_slice())
     }
 
     /// Get a closure by index
@@ -591,6 +635,18 @@ impl Interpreter {
                     self.stack.push(Value::bool(true));
                 }
 
+                // Create empty object (Object opcode)
+                op if op == OpCode::Object as u8 => {
+                    let frame = self.call_stack.last_mut().unwrap();
+                    let bytecode = unsafe { &*frame.bytecode };
+                    let bc = &bytecode.bytecode;
+                    // Skip the 16-bit class id (unused for now)
+                    let _class_id = u16::from_le_bytes([bc[frame.pc], bc[frame.pc + 1]]);
+                    frame.pc += 2;
+                    let obj = self.create_object();
+                    self.stack.push(obj);
+                }
+
                 // Push empty string
                 op if op == OpCode::PushEmptyString as u8 => {
                     self.stack.push(Value::string(crate::value::STR_EMPTY));
@@ -618,8 +674,13 @@ impl Interpreter {
                     let bc = &bytecode.bytecode;
                     let idx = u16::from_le_bytes([bc[frame.pc], bc[frame.pc + 1]]) as usize;
                     frame.pc += 2;
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(idx).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    let val = self.stack.get_local_at(frame_ptr, idx).unwrap_or_default();
+                    let val = if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize]
+                    } else {
+                        self.stack.get_local_at(frame_ptr, idx).unwrap_or_default()
+                    };
                     self.stack.push(val);
                 }
 
@@ -631,33 +692,58 @@ impl Interpreter {
                     let bc = &bytecode.bytecode;
                     let idx = u16::from_le_bytes([bc[frame.pc], bc[frame.pc + 1]]) as usize;
                     frame.pc += 2;
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(idx).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    self.stack.set_local_at(frame_ptr, idx, val);
+                    if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize] = val;
+                    } else {
+                        self.stack.set_local_at(frame_ptr, idx, val);
+                    }
                 }
 
                 // Get local 0-3 (optimized)
                 op if op == OpCode::GetLoc0 as u8 => {
                     let frame = self.call_stack.last().unwrap();
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(0).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    let val = self.stack.get_local_at(frame_ptr, 0).unwrap_or_default();
+                    let val = if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize]
+                    } else {
+                        self.stack.get_local_at(frame_ptr, 0).unwrap_or_default()
+                    };
                     self.stack.push(val);
                 }
                 op if op == OpCode::GetLoc1 as u8 => {
                     let frame = self.call_stack.last().unwrap();
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(1).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    let val = self.stack.get_local_at(frame_ptr, 1).unwrap_or_default();
+                    let val = if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize]
+                    } else {
+                        self.stack.get_local_at(frame_ptr, 1).unwrap_or_default()
+                    };
                     self.stack.push(val);
                 }
                 op if op == OpCode::GetLoc2 as u8 => {
                     let frame = self.call_stack.last().unwrap();
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(2).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    let val = self.stack.get_local_at(frame_ptr, 2).unwrap_or_default();
+                    let val = if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize]
+                    } else {
+                        self.stack.get_local_at(frame_ptr, 2).unwrap_or_default()
+                    };
                     self.stack.push(val);
                 }
                 op if op == OpCode::GetLoc3 as u8 => {
                     let frame = self.call_stack.last().unwrap();
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(3).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    let val = self.stack.get_local_at(frame_ptr, 3).unwrap_or_default();
+                    let val = if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize]
+                    } else {
+                        self.stack.get_local_at(frame_ptr, 3).unwrap_or_default()
+                    };
                     self.stack.push(val);
                 }
 
@@ -665,26 +751,46 @@ impl Interpreter {
                 op if op == OpCode::PutLoc0 as u8 => {
                     let val = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let frame = self.call_stack.last().unwrap();
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(0).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    self.stack.set_local_at(frame_ptr, 0, val);
+                    if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize] = val;
+                    } else {
+                        self.stack.set_local_at(frame_ptr, 0, val);
+                    }
                 }
                 op if op == OpCode::PutLoc1 as u8 => {
                     let val = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let frame = self.call_stack.last().unwrap();
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(1).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    self.stack.set_local_at(frame_ptr, 1, val);
+                    if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize] = val;
+                    } else {
+                        self.stack.set_local_at(frame_ptr, 1, val);
+                    }
                 }
                 op if op == OpCode::PutLoc2 as u8 => {
                     let val = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let frame = self.call_stack.last().unwrap();
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(2).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    self.stack.set_local_at(frame_ptr, 2, val);
+                    if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize] = val;
+                    } else {
+                        self.stack.set_local_at(frame_ptr, 2, val);
+                    }
                 }
                 op if op == OpCode::PutLoc3 as u8 => {
                     let val = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
                     let frame = self.call_stack.last().unwrap();
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(3).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    self.stack.set_local_at(frame_ptr, 3, val);
+                    if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize] = val;
+                    } else {
+                        self.stack.set_local_at(frame_ptr, 3, val);
+                    }
                 }
 
                 // Get local (8-bit index)
@@ -693,8 +799,13 @@ impl Interpreter {
                     let bytecode = unsafe { &*frame.bytecode };
                     let idx = bytecode.bytecode[frame.pc] as usize;
                     frame.pc += 1;
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(idx).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    let val = self.stack.get_local_at(frame_ptr, idx).unwrap_or_default();
+                    let val = if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize]
+                    } else {
+                        self.stack.get_local_at(frame_ptr, idx).unwrap_or_default()
+                    };
                     self.stack.push(val);
                 }
 
@@ -705,8 +816,13 @@ impl Interpreter {
                     let bytecode = unsafe { &*frame.bytecode };
                     let idx = bytecode.bytecode[frame.pc] as usize;
                     frame.pc += 1;
+                    let cell = frame.local_cells.as_ref().and_then(|lc| lc.get(idx).copied().flatten());
                     let frame_ptr = frame.frame_ptr;
-                    self.stack.set_local_at(frame_ptr, idx, val);
+                    if let Some(cell_idx) = cell {
+                        self.var_cells[cell_idx as usize] = val;
+                    } else {
+                        self.stack.set_local_at(frame_ptr, idx, val);
+                    }
                 }
 
                 // Get argument (16-bit index)
@@ -807,12 +923,17 @@ impl Interpreter {
                     let idx = u16::from_le_bytes([bc[frame.pc], bc[frame.pc + 1]]) as usize;
                     frame.pc += 2;
 
-                    // Get the closure for this frame
+                    // Get the closure for this frame, look up cell index, read from var_cells
                     let closure_idx = frame.closure_idx;
                     let val = if let Some(closure_idx) = closure_idx {
-                        self.get_closure(closure_idx as u32)
-                            .and_then(|c| c.get_var(idx))
-                            .unwrap_or_default()
+                        if let Some(cell_idx) = self
+                            .get_closure(closure_idx as u32)
+                            .and_then(|c| c.get_cell_index(idx))
+                        {
+                            self.var_cells[cell_idx as usize]
+                        } else {
+                            Value::undefined()
+                        }
                     } else {
                         Value::undefined()
                     };
@@ -828,10 +949,13 @@ impl Interpreter {
                     let idx = u16::from_le_bytes([bc[frame.pc], bc[frame.pc + 1]]) as usize;
                     frame.pc += 2;
 
-                    // Set the captured variable in the closure
+                    // Write to the shared cell via closure's cell index
                     if let Some(closure_idx) = frame.closure_idx {
-                        if let Some(closure) = self.get_closure_mut(closure_idx as u32) {
-                            closure.set_var(idx, val);
+                        if let Some(cell_idx) = self
+                            .get_closure(closure_idx as u32)
+                            .and_then(|c| c.get_cell_index(idx))
+                        {
+                            self.var_cells[cell_idx as usize] = val;
                         }
                     }
                 }
@@ -1267,6 +1391,10 @@ impl Interpreter {
                         InterpreterError::InternalError("no call frame to return from".to_string())
                     })?;
 
+                    // Promote compile-time strings before leaving this scope
+                    let bytecode_ref = unsafe { &*frame.bytecode };
+                    let result = self.promote_string(result, bytecode_ref);
+
                     // Clean up locals from the stack
                     let local_count = unsafe { (*frame.bytecode).local_count } as usize;
                     self.stack.drop_n(local_count);
@@ -1349,25 +1477,57 @@ impl Interpreter {
                         ))
                     })?;
 
-                    // Capture variables based on inner function's capture info
-                    let mut var_refs = Vec::with_capacity(inner_func.captures.len());
+                    // Capture variables into shared cells
+                    let mut cell_indices = Vec::with_capacity(inner_func.captures.len());
                     for capture in &inner_func.captures {
-                        let val = if capture.is_local {
+                        let cell_idx = if capture.is_local {
                             // Capture from outer's locals (current frame)
-                            self.stack
-                                .get_local_at(frame_ptr, capture.outer_index)
-                                .unwrap_or_default()
+                            // Check if this local already has a cell (shared with other closures)
+                            let frame_ref = self.call_stack.last().unwrap();
+                            let existing_cell = frame_ref
+                                .local_cells
+                                .as_ref()
+                                .and_then(|lc| lc.get(capture.outer_index).copied().flatten());
+                            if let Some(idx) = existing_cell {
+                                // Reuse existing cell — but first sync the cell with the
+                                // current local value (the local may have been updated since
+                                // the cell was created)
+                                let current_val = self
+                                    .stack
+                                    .get_local_at(frame_ptr, capture.outer_index)
+                                    .unwrap_or_default();
+                                self.var_cells[idx as usize] = current_val;
+                                idx
+                            } else {
+                                // Allocate a new cell with the current local value
+                                let val = self
+                                    .stack
+                                    .get_local_at(frame_ptr, capture.outer_index)
+                                    .unwrap_or_default();
+                                let idx = self.alloc_var_cell(val);
+                                // Record in the frame's local_cells map
+                                let frame_mut = self.call_stack.last_mut().unwrap();
+                                let local_count =
+                                    unsafe { (*frame_mut.bytecode).local_count } as usize;
+                                let lc = frame_mut
+                                    .local_cells
+                                    .get_or_insert_with(|| vec![None; local_count]);
+                                if capture.outer_index < lc.len() {
+                                    lc[capture.outer_index] = Some(idx);
+                                }
+                                idx
+                            }
                         } else {
-                            // Capture from outer's captures (current frame's closure)
+                            // Capture from outer's captures — reuse the same cell index
                             if let Some(closure_idx) = closure_idx_current {
                                 self.get_closure(closure_idx as u32)
-                                    .and_then(|c| c.get_var(capture.outer_index))
-                                    .unwrap_or_default()
+                                    .and_then(|c| c.get_cell_index(capture.outer_index))
+                                    .unwrap_or_else(|| self.alloc_var_cell(Value::undefined()))
                             } else {
-                                Value::undefined()
+                                self.alloc_var_cell(Value::undefined())
                             }
                         };
-                        var_refs.push(val);
+                        cell_indices.push(cell_idx);
                     }
 
                     // Update PC after we're done reading
@@ -1375,8 +1535,8 @@ impl Interpreter {
                     frame.pc += 2;
 
                     // Create closure or simple function reference based on whether there are captures
-                    let func_val = if !var_refs.is_empty() {
-                        self.create_closure(inner_func as *const _, var_refs)
+                    let func_val = if !cell_indices.is_empty() {
+                        self.create_closure(inner_func as *const _, cell_indices)
                     } else {
                         Value::func_ptr(inner_func as *const _)
                     };
@@ -1398,6 +1558,12 @@ impl Interpreter {
                         args.push(self.stack.pop().ok_or(InterpreterError::StackUnderflow)?);
                     }
                     args.reverse(); // Arguments were pushed left-to-right
+
+                    // Promote compile-time string arguments to runtime strings
+                    // so they remain valid across function boundaries
+                    for arg in &mut args {
+                        *arg = self.promote_string(*arg, bytecode);
+                    }
 
                     // Pop the function value
                     let func_val = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
@@ -1800,6 +1966,11 @@ impl Interpreter {
                         args.push(self.stack.pop().ok_or(InterpreterError::StackUnderflow)?);
                     }
                     args.reverse(); // Arguments were pushed left-to-right
+
+                    // Promote compile-time string arguments to runtime strings
+                    for arg in &mut args {
+                        *arg = self.promote_string(*arg, bytecode);
+                    }
 
                     // Pop the method value
                     let method_val = self.stack.pop().ok_or(InterpreterError::StackUnderflow)?;
@@ -2467,6 +2638,10 @@ impl Interpreter {
                             ))
                         })?
                         .clone();
+
+                    // Promote compile-time strings to runtime strings so they
+                    // remain valid when the object is accessed from other scopes.
+                    let val = self.promote_string(val, bytecode);
 
                     // Set property on object
                     if let Some(obj_idx) = obj.to_object_idx() {

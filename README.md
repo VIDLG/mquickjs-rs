@@ -1,17 +1,22 @@
 # MQuickJS-RS
 
-A Rust port of [MQuickJS](https://github.com/bellard/mquickjs) - Fabrice Bellard's minimalist JavaScript engine designed for embedded systems.
+A Rust port of [MQuickJS](https://github.com/bellard/mquickjs) focused on embedded JavaScript execution for ESP32-class devices.
 
-> **Note**: This is a **learning project** created for educational purposes. It demonstrates how JavaScript engines work internally (lexer, parser, bytecode compiler, virtual machine, garbage collector). Not intended for production use.
+This repository is being hardened into a product-oriented runtime for LED effect scripts. It does **not** target full ECMAScript compatibility; it targets a constrained ES6-style profile optimized for deterministic execution, bounded resources, and host integration on MCU devices.
+
+See:
+
+- `docs/LED_PROFILE.md` for the product script contract
+- `docs/PRODUCT_ROADMAP.md` for the productization plan
+- `docs/JS_FEATURE_SPEC.md` for the engine's broader implementation notes
 
 ## Features
 
-- **Minimal footprint**: Can run JavaScript with as low as 10KB of RAM
-- **ES5 subset**: "Stricter mode" JavaScript with essential features
-- **Tracing GC**: Mark-compact garbage collector (no reference counting)
-- **Stack-based VM**: Efficient bytecode interpreter
-- **UTF-8 strings**: Memory-efficient string storage
-- **No unsafe code**: Pure safe Rust implementation
+- **Embedded focus**: designed for MCU-hosted LED effect execution
+- **Constrained ES6-style profile**: product scripts target a documented subset, not full ES6
+- **Stack-based VM**: compact bytecode interpreter core
+- **Typed array support**: `Uint8Array`-centric data path for LED frame buffers
+- **Offline-friendly**: suitable for validated script-to-bytecode workflows
 
 ## Installation
 
@@ -91,7 +96,13 @@ fn main() {
 }
 ```
 
-## Supported Features
+## Script Profile
+
+Product scripts should target `docs/LED_PROFILE.md`.
+
+This project intentionally supports a constrained JavaScript profile rather than the full ECMAScript standard. If a feature is not explicitly included in the profile, it should be treated as unsupported for product scripts.
+
+## Engine Features
 
 ### Language Features
 

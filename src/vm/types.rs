@@ -207,26 +207,22 @@ impl Iterator for ForOfIterator {
 pub struct ClosureData {
     /// Reference to the function bytecode
     pub bytecode: *const FunctionBytecode,
-    /// Captured variable values
-    pub var_refs: Vec<Value>,
+    /// Indices into interpreter's var_cells pool (shared mutable cells)
+    pub cell_indices: Vec<u32>,
 }
 
 impl ClosureData {
-    /// Create a new closure with captured values
-    pub fn new(bytecode: *const FunctionBytecode, var_refs: Vec<Value>) -> Self {
-        ClosureData { bytecode, var_refs }
-    }
-
-    /// Get a captured variable value
-    pub fn get_var(&self, index: usize) -> Option<Value> {
-        self.var_refs.get(index).copied()
-    }
-
-    /// Set a captured variable value
-    pub fn set_var(&mut self, index: usize, value: Value) {
-        if index < self.var_refs.len() {
-            self.var_refs[index] = value;
+    /// Create a new closure with cell indices
+    pub fn new(bytecode: *const FunctionBytecode, cell_indices: Vec<u32>) -> Self {
+        ClosureData {
+            bytecode,
+            cell_indices,
         }
+    }
+
+    /// Get the cell index for a captured variable
+    pub fn get_cell_index(&self, index: usize) -> Option<u32> {
+        self.cell_indices.get(index).copied()
     }
 }
 
@@ -253,6 +249,9 @@ pub struct CallFrame {
     pub closure_idx: Option<usize>,
     /// Whether this is a constructor call (new operator)
     pub is_constructor: bool,
+    /// Maps local indices to var_cells indices (None = not captured, Some(idx) = cell index).
+    /// Lazily allocated when the first local in this frame is captured.
+    pub local_cells: Option<Vec<Option<u32>>>,
 }
 
 impl CallFrame {
@@ -275,6 +274,7 @@ impl CallFrame {
             this_func,
             closure_idx: None,
             is_constructor: false,
+            local_cells: None,
         }
     }
 
@@ -298,6 +298,7 @@ impl CallFrame {
             this_func,
             closure_idx: Some(closure_idx),
             is_constructor: false,
+            local_cells: None,
         }
     }
 
@@ -320,6 +321,7 @@ impl CallFrame {
             this_func,
             closure_idx: None,
             is_constructor: true,
+            local_cells: None,
         }
     }
 
@@ -343,6 +345,7 @@ impl CallFrame {
             this_func,
             closure_idx: Some(closure_idx),
             is_constructor: true,
+            local_cells: None,
         }
     }
 }
@@ -414,6 +417,9 @@ pub struct Interpreter {
     /// Closures created during execution
     /// Values on the stack can reference closures by index
     pub(crate) closures: Vec<ClosureData>,
+    /// Shared mutable variable cells for closure captures.
+    /// Multiple closures capturing the same variable share the same cell index.
+    pub(crate) var_cells: Vec<Value>,
     /// Exception handler stack
     pub(crate) exception_handlers: Vec<ExceptionHandler>,
     /// Arrays created during execution

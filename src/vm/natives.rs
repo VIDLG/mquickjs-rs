@@ -966,6 +966,30 @@ pub(crate) fn native_number_to_precision(
 // TypedArray.prototype methods
 // =============================================================================
 
+/// TypedArray.prototype.fill - fill typed array with a value
+pub(crate) fn native_typed_array_fill(
+    interp: &mut Interpreter,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, String> {
+    let typed_idx = this
+        .to_typed_array_idx()
+        .ok_or_else(|| "fill called on non-TypedArray".to_string())?;
+
+    let fill_val = args.first().copied().unwrap_or_default();
+
+    let ta = interp
+        .typed_arrays
+        .get_mut(typed_idx as usize)
+        .ok_or_else(|| "invalid TypedArray index".to_string())?;
+
+    for i in 0..ta.length {
+        ta.set(i, fill_val);
+    }
+
+    Ok(this)
+}
+
 /// TypedArray.prototype.subarray - create a new typed array view
 pub(crate) fn native_typed_array_subarray(
     interp: &mut Interpreter,
@@ -3856,6 +3880,11 @@ impl Interpreter {
         self.register_native("Array.prototype.fill", native_array_fill, 1);
 
         // TypedArray.prototype methods
+        self.register_native(
+            "TypedArray.prototype.fill",
+            native_typed_array_fill,
+            1,
+        );
         self.register_native(
             "TypedArray.prototype.subarray",
             native_typed_array_subarray,

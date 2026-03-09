@@ -1,6 +1,8 @@
 # MQuickJS-RS JavaScript 特性规范
 
-本文档记录 MQuickJS-RS 引擎实际支持的 JavaScript 特性集合。MQuickJS 是面向嵌入式/单片机的极简引擎，有意裁剪了标准 JS 的大量特性以换取极小的内存占用（最低 10KB RAM）。
+本文档记录 MQuickJS-RS 引擎当前实现层面的 JavaScript 特性集合。
+
+对于 ESP32 LED 特效等产品脚本，请优先以 `docs/LED_PROFILE.md` 为准。`LED_PROFILE` 是产品约束，本文档是实现说明；两者不一致时，应以产品 Profile 驱动后续实现和修正。
 
 ## 核心设计约束
 
